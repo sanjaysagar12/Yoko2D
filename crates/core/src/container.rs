@@ -36,6 +36,35 @@ impl PatternData {
         id
     }
 
+    /// Inserts `obj` under a caller-chosen `id` instead of an
+    /// auto-allocated one, failing with [`ContainerError::DuplicateId`]
+    /// rather than overwriting if `id` is already taken.
+    ///
+    /// `pub(crate)` on purpose: this exists solely for the Phase 3
+    /// recompute engine (`recompute::recompute_all`), which rebuilds a
+    /// `PatternData` from a `Document`'s `ToolRecord`s and must place each
+    /// resolved object under the *same* id its `ToolRecord` was given when
+    /// the tool was first added — ids there come from `Document`'s own
+    /// counter, not this container's. Ordinary callers outside this crate
+    /// only ever get ids back from [`Self::add_object`], so they have no
+    /// legitimate use for choosing one themselves.
+    pub(crate) fn insert_with_id(
+        &mut self,
+        id: ObjectId, // the caller-chosen id to insert under, instead of allocating a fresh one
+        obj: GeoObject, // the object to store
+    ) -> Result<(), ContainerError> {
+        if self.objects.contains_key(&id) {
+            // `id` already names something: refuse to insert rather than silently overwrite it
+            return Err(ContainerError::DuplicateId(id)); // report the collision to the caller
+        }
+        self.objects.insert(id, obj); // `id` is confirmed free, so the insert can't clobber anything
+        if id.raw() >= self.next_id {
+            // this id is at or past where the auto-allocating counter currently sits
+            self.next_id = id.raw() + 1; // push the counter past it, so `add_object` can never reissue this id later
+        }
+        Ok(()) // inserted successfully, with the id counter kept consistent
+    }
+
     /// Looks up `id` expecting it to hold a [`PointData`].
     ///
     /// Distinguishes the two ways this can fail: `id` isn't in the
@@ -348,6 +377,36 @@ mod tests {
         let mut names: Vec<&String> = data.variables().map(|(name, _)| name).collect();
         names.sort();
         assert_eq!(names, vec!["seam_len", "waist"]);
+    }
+
+    #[test]
+    fn insert_with_id_rejects_a_duplicate_id() {
+        let mut data = PatternData::default();
+        let id = data.add_object(GeoObject::Point(PointData { x: 0.0, y: 0.0 }));
+
+        let err = data
+            .insert_with_id(id, GeoObject::Point(PointData { x: 9.0, y: 9.0 }))
+            .unwrap_err();
+        assert_eq!(err, ContainerError::DuplicateId(id));
+
+        // the original object must survive untouched: no silent overwrite on failure
+        let point = data.get_point(id).unwrap();
+        assert_eq!(point.x, 0.0);
+        assert_eq!(point.y, 0.0);
+    }
+
+    #[test]
+    fn insert_with_id_advances_next_id_past_the_inserted_value() {
+        let mut data = PatternData::default();
+        let manual_id = data.insert_with_id(
+            ObjectId::new(10),
+            GeoObject::Point(PointData { x: 1.0, y: 1.0 }),
+        );
+        assert!(manual_id.is_ok());
+
+        // a subsequent auto-allocated id must not collide with the manually-inserted one
+        let next = data.add_object(GeoObject::Point(PointData { x: 2.0, y: 2.0 }));
+        assert!(next.raw() > 10);
     }
 
     #[test]

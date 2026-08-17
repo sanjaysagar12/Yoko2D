@@ -33,4 +33,12 @@ pub enum ContainerError {
     /// `clear_variables`/`clear_all`.
     #[error("variable {0:?} not found")]
     VariableNotFound(String),
+
+    /// `insert_with_id` was asked to insert an object under an id that
+    /// already names something in the container. Returned instead of
+    /// silently overwriting, since a collision here means the caller (the
+    /// Phase 3 recompute engine) has a bug — two `ToolRecord`s sharing one
+    /// id — that should surface loudly rather than quietly clobber data.
+    #[error("object {0:?} already exists")]
+    DuplicateId(ObjectId),
 }

@@ -22,6 +22,17 @@ impl ObjectId {
     pub(crate) fn new(id: u32) -> Self {
         ObjectId(id)
     }
+
+    /// Returns the wrapped raw value.
+    ///
+    /// Deliberately `pub(crate)`, not `pub`, for the same reason as `new`:
+    /// the raw `u32` is an implementation detail (used by
+    /// `PatternData::insert_with_id` to keep its id counter ahead of any
+    /// manually-inserted id), not something external code should read or
+    /// reconstruct an `ObjectId` from.
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
 }
 
 #[cfg(test)]

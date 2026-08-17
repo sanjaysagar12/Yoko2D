@@ -10,23 +10,18 @@
 )]
 
 pub mod container;
+pub mod document;
 pub mod error;
 pub mod formula;
 pub mod geo;
 pub mod id;
+pub mod recompute;
 pub mod variable;
 
 pub use container::PatternData;
+pub use document::{Document, ToolKind, ToolRecord};
 pub use error::ContainerError;
 pub use geo::{GeoObject, LineData, PointData};
 pub use id::ObjectId;
+pub use recompute::{recompute_all, PatternError};
 pub use variable::{Variable, VariableKind};
-
-/// Placeholder for the pattern's document-level metadata (name, author,
-/// units, measurement file reference, …) that will grow out in a later
-/// phase. Not wired into `PatternData` yet — this phase only implements the
-/// object/variable container itself.
-#[derive(Debug, Clone, Default)]
-pub struct Document {
-    pub note: String,
-}

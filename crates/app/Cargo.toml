@@ -3,13 +3,29 @@ name = "app"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "yoko2d-app"
 path = "src/main.rs"
 
+# The dependency on the `core` package is aliased to `core_lib` here, for the
+# same reason `crates/io/Cargo.toml` does it: this crate uses
+# `thiserror::Error` (in `sync.rs`), whose derive macro expands to code
+# referencing bare `core::fmt`/`core::write` paths. Binding this dependency
+# to the plain name `core` would collide with (and shadow) the real sysroot
+# `core` crate in this crate's extern prelude, breaking that macro expansion.
 [dependencies]
-core = { path = "../core" }
+core_lib = { package = "core", path = "../core" }
 io = { path = "../io" }
 render = { path = "../render" }
 egui.workspace = true
 eframe.workspace = true
+thiserror.workspace = true
+notify.workspace = true
+notify-debouncer-mini.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

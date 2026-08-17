@@ -1,0 +1,15 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "yoko2d-app"
+path = "src/main.rs"
+
+[dependencies]
+core = { path = "../core" }
+io = { path = "../io" }
+render = { path = "../render" }
+egui.workspace = true
+eframe.workspace = true

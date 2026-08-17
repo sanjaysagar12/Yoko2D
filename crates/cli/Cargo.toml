@@ -1,0 +1,16 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "yoko2d-cli"
+path = "src/main.rs"
+
+[dependencies]
+core = { path = "../core" }
+io = { path = "../io" }
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true

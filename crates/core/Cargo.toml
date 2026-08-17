@@ -1,0 +1,18 @@
+[package]
+name = "core"
+version.workspace = true
+edition.workspace = true
+
+# Doctests are disabled because this package is named `core`: rustdoc builds
+# each doc example against the just-built library via a self-referential
+# `--extern core=...`, which shadows the sysroot `core` crate that macros
+# like `thiserror::Error` expand against (`core::fmt`, `core::write!`),
+# causing spurious resolution failures unrelated to any actual doc content.
+# There are no runnable doc examples in this crate, so nothing is lost.
+[lib]
+doctest = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

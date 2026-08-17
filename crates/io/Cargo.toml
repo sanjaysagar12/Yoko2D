@@ -1,0 +1,10 @@
+[package]
+name = "io"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

@@ -158,6 +158,84 @@ fn write_tool_record(writer: &mut Writer<Vec<u8>>, record: &ToolRecord) -> std::
                 .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the line's second endpoint, by id
                 .write_empty()?;
         }
+        ToolKind::AlongLine {
+            name,
+            p1,
+            p2,
+            length_formula,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "alongLine")) // selects the alongLine interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // the point measured from
+                .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the point defining the direction to continue in
+                .with_attribute(("length", length_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .write_empty()?;
+        }
+        ToolKind::Normal {
+            name,
+            p1,
+            p2,
+            length_formula,
+            angle_formula,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "normal")) // selects the normal interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // the point measured from
+                .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the point defining the perpendicular line
+                .with_attribute(("length", length_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .with_attribute(("angle", angle_formula.as_str())) // likewise, the extra-rotation formula string, unevaluated
+                .write_empty()?;
+        }
+        ToolKind::Bisector {
+            name,
+            p1,
+            p2,
+            p3,
+            length_formula,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "bisector")) // selects the bisector interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // one angle ray, measured from the vertex p2
+                .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the angle's vertex
+                .with_attribute(("thirdPoint", p3.raw().to_string().as_str())) // the other angle ray, measured from the vertex p2
+                .with_attribute(("length", length_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .write_empty()?;
+        }
+        ToolKind::Height {
+            name,
+            point,
+            line_p1,
+            line_p2,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "height")) // selects the height interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("point", point.raw().to_string().as_str())) // the point being projected
+                .with_attribute(("firstPoint", line_p1.raw().to_string().as_str())) // one point defining the line being projected onto
+                .with_attribute(("secondPoint", line_p2.raw().to_string().as_str())) // the other point defining the line being projected onto
+                .write_empty()?; // no formula fields: Height is pure geometry
+        }
+        ToolKind::Midpoint { name, p1, p2 } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "midpoint")) // selects the midpoint interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // the segment's first endpoint
+                .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the segment's second endpoint
+                .write_empty()?; // no formula fields: Midpoint is pure geometry
+        }
     }
     Ok(()) // this record's element was written successfully
 }
@@ -263,6 +341,86 @@ fn parse_point(start: &BytesStart) -> Result<ToolRecord, PatternFileError> {
                     angle_formula,
                     length_formula,
                 },
+            })
+        }
+        "alongLine" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1 = parse_id("point", &attrs, "firstPoint")?; // the point measured from
+            let p2 = parse_id("point", &attrs, "secondPoint")?; // the point defining the direction to continue in
+            let length_formula = require_attr("point", &attrs, "length")?.to_string(); // the length formula, unevaluated: a formula string, not a resolved number
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::AlongLine {
+                    name,
+                    p1,
+                    p2,
+                    length_formula,
+                },
+            })
+        }
+        "normal" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1 = parse_id("point", &attrs, "firstPoint")?; // the point measured from
+            let p2 = parse_id("point", &attrs, "secondPoint")?; // the point defining the perpendicular line
+            let length_formula = require_attr("point", &attrs, "length")?.to_string(); // the length formula, unevaluated
+            let angle_formula = require_attr("point", &attrs, "angle")?.to_string(); // the extra-rotation formula, unevaluated
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::Normal {
+                    name,
+                    p1,
+                    p2,
+                    length_formula,
+                    angle_formula,
+                },
+            })
+        }
+        "bisector" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1 = parse_id("point", &attrs, "firstPoint")?; // one angle ray, measured from the vertex p2
+            let p2 = parse_id("point", &attrs, "secondPoint")?; // the angle's vertex
+            let p3 = parse_id("point", &attrs, "thirdPoint")?; // the other angle ray, measured from the vertex p2
+            let length_formula = require_attr("point", &attrs, "length")?.to_string(); // the length formula, unevaluated
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::Bisector {
+                    name,
+                    p1,
+                    p2,
+                    p3,
+                    length_formula,
+                },
+            })
+        }
+        "height" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let point = parse_id("point", &attrs, "point")?; // the point being projected
+            let line_p1 = parse_id("point", &attrs, "firstPoint")?; // one point defining the line being projected onto
+            let line_p2 = parse_id("point", &attrs, "secondPoint")?; // the other point defining the line being projected onto
+                                                                     // no formula attributes: Height is pure geometry
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::Height {
+                    name,
+                    point,
+                    line_p1,
+                    line_p2,
+                },
+            })
+        }
+        "midpoint" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1 = parse_id("point", &attrs, "firstPoint")?; // the segment's first endpoint
+            let p2 = parse_id("point", &attrs, "secondPoint")?; // the segment's second endpoint
+                                                                // no formula attributes: Midpoint is pure geometry
+            Ok(ToolRecord {
+                id,                                        // the id parsed above
+                kind: ToolKind::Midpoint { name, p1, p2 }, // a straight-line midpoint, referenced by id
             })
         }
         other => Err(PatternFileError::UnknownToolType(other.to_string())), // future-proofs against files referencing tool types this parser version doesn't know about, rather than silently ignoring or misinterpreting them
@@ -526,5 +684,111 @@ mod tests {
 
         let (restored, _path) = deserialize_document(&xml).unwrap();
         assert_eq!(restored.base_variables().count(), 0);
+    }
+
+    // Phase 10a round-trip tests: build a Document using exactly one of the
+    // five new tools, serialize it, deserialize the result, and confirm
+    // post-recompute geometry matches between the original and the
+    // round-tripped Document — same pattern as Phase 8's own round-trip
+    // test, applied to each new ToolKind variant in turn.
+
+    #[test]
+    fn along_line_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1 = original.add_base_point("P1", 0.0, 0.0);
+        let p2 = original.add_base_point("P2", 3.0, 4.0);
+        original.add_along_line("AL", p1, p2, "10").unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn normal_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1 = original.add_base_point("P1", 0.0, 0.0);
+        let p2 = original.add_base_point("P2", 3.0, 4.0);
+        original.add_normal("N", p1, p2, "10", "45").unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn bisector_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1 = original.add_base_point("P1", 4.0, 5.0);
+        let p2 = original.add_base_point("P2", 1.0, 1.0);
+        let p3 = original.add_base_point("P3", 5.0, 4.0);
+        original.add_bisector("B", p1, p2, p3, "10").unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn height_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let line_p1 = original.add_base_point("L1", 0.0, 0.0);
+        let line_p2 = original.add_base_point("L2", 4.0, 3.0);
+        let target = original.add_base_point("P", 4.0, 0.0);
+        original.add_height("H", target, line_p1, line_p2).unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn midpoint_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1 = original.add_base_point("P1", 1.0, 3.0);
+        let p2 = original.add_base_point("P2", 7.0, 9.0);
+        original.add_midpoint("M", p1, p2).unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn normal_missing_angle_attribute_is_reported() {
+        let xml = r#"<pattern><history>
+            <point type="basePoint" id="1" name="A" x="0" y="0"/>
+            <point type="basePoint" id="2" name="B" x="3" y="4"/>
+            <point type="normal" id="3" name="N" firstPoint="1" secondPoint="2" length="10"/>
+        </history></pattern>"#;
+
+        let err = deserialize_document(xml).unwrap_err();
+        match err {
+            PatternFileError::MissingAttribute { tag, attribute } => {
+                assert_eq!(tag, "point");
+                assert_eq!(attribute, "angle");
+            }
+            other => panic!("expected MissingAttribute, got {other:?}"),
+        }
     }
 }

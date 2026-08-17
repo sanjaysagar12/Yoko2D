@@ -66,6 +66,16 @@ fn references_of(kind: &ToolKind) -> Vec<ObjectId> {
         ToolKind::BasePoint { .. } => Vec::new(), // no dependencies: a literal starting point
         ToolKind::EndLine { base_point, .. } => vec![*base_point], // depends on exactly one earlier point
         ToolKind::Line { p1, p2 } => vec![*p1, *p2], // depends on exactly two earlier points
+        ToolKind::AlongLine { p1, p2, .. } => vec![*p1, *p2], // depends on the measured-from point and the direction point
+        ToolKind::Normal { p1, p2, .. } => vec![*p1, *p2], // depends on the measured-from point and the point defining the perpendicular line
+        ToolKind::Bisector { p1, p2, p3, .. } => vec![*p1, *p2, *p3], // depends on both angle rays plus the vertex
+        ToolKind::Height {
+            point,
+            line_p1,
+            line_p2,
+            ..
+        } => vec![*point, *line_p1, *line_p2], // depends on the projected point plus both points defining the line
+        ToolKind::Midpoint { p1, p2, .. } => vec![*p1, *p2], // depends on both segment endpoints
     }
 }
 
@@ -81,11 +91,19 @@ pub struct ToolRecord {
     pub kind: ToolKind, // which kind of tool this is, and its formula/literal inputs
 }
 
-// TODO(phase 10): AlongLine, Normal, Bisector, Arc, Spline, ...
+// TODO(phase 10b+): ShoulderPoint, PointOfContact, intersection tools,
+// curve tools (Arc, Spline, ...), and transform operations remain for
+// later phases — the intersection/curve/transform tools involve
+// multi-solution ambiguity or new GeoObject variants that are explicitly
+// out of scope for Phase 10a.
 /// The kind of a [`ToolRecord`], carrying whatever inputs that tool needs
-/// to produce its geometry. Only the three tools needed to prove the
-/// recompute engine end-to-end are implemented so far; more tool kinds
-/// arrive in later phases.
+/// to produce its geometry. Phase 10a adds the five single-point
+/// construction tools (`AlongLine`/`Normal`/`Bisector`/`Height`/
+/// `Midpoint`) alongside the `BasePoint`/`EndLine`/`Line` trio from
+/// earlier phases, establishing the repeatable pattern (a `ToolKind`
+/// variant, a `references_of` arm, a `Document::add_*` constructor, a
+/// `recompute_all` arm, and XML read/write support) later phases reuse for
+/// further tool types.
 #[derive(Debug, Clone, PartialEq)] // same rationale as the derives on `ToolRecord` above
 pub enum ToolKind {
     /// A literal starting point: no formulas, no dependency on any other
@@ -112,6 +130,63 @@ pub enum ToolKind {
     Line {
         p1: ObjectId, // the line's first endpoint
         p2: ObjectId, // the line's second endpoint
+    },
+
+    /// A new point measured `length_formula` units from `p1`, continuing
+    /// straight along the direction from `p1` toward `p2`. A common
+    /// pattern-drafting move: "extend this line segment by a further
+    /// amount" (e.g. lengthening a hem allowance past an existing edge).
+    AlongLine {
+        name: String,           // the point's user-facing label
+        p1: ObjectId,           // the point measured from
+        p2: ObjectId,           // the point that defines the direction to continue in
+        length_formula: String, // a formula string evaluating to the distance from `p1`, along the p1->p2 direction
+    },
+
+    /// A new point offset from `p1` along the direction perpendicular to
+    /// the `p1`-`p2` line, additionally rotated by `angle_formula`
+    /// degrees, at `length_formula` distance. Used for drafting seam
+    /// allowances and construction lines that need to run perpendicular
+    /// (or near-perpendicular) to an existing edge.
+    Normal {
+        name: String,           // the point's user-facing label
+        p1: ObjectId,           // the point measured from
+        p2: ObjectId, // the point that, together with p1, defines the line to be perpendicular to
+        length_formula: String, // a formula string evaluating to the distance from `p1`
+        angle_formula: String, // a formula string evaluating to an additional rotation, in degrees, applied on top of the perpendicular direction
+    },
+
+    /// A new point along the bisector of the angle `p1`-`p2`-`p3` (`p2` is
+    /// the angle's vertex), at `length_formula` distance from `p2`. Used
+    /// for symmetric darts and other constructions that need to split an
+    /// angle evenly.
+    Bisector {
+        name: String,           // the point's user-facing label
+        p1: ObjectId,           // one ray of the angle, measured from the vertex p2
+        p2: ObjectId,           // the angle's vertex
+        p3: ObjectId,           // the other ray of the angle, measured from the vertex p2
+        length_formula: String, // a formula string evaluating to the distance from p2, along the bisecting direction
+    },
+
+    /// A new point: the perpendicular projection of `point` onto the line
+    /// through `line_p1`/`line_p2` — the foot of the altitude from `point`
+    /// to that line. Pure geometry, no formula: used to drop a
+    /// perpendicular from a point onto an existing edge, e.g. to find
+    /// where a dart's centerline meets a hem.
+    Height {
+        name: String,      // the point's user-facing label
+        point: ObjectId,   // the point being projected
+        line_p1: ObjectId, // one point defining the line being projected onto
+        line_p2: ObjectId, // the other point defining the line being projected onto
+    },
+
+    /// A new point exactly halfway between `p1` and `p2`. Pure geometry,
+    /// no formula: used whenever a construction needs the midpoint of an
+    /// existing segment, e.g. to center a dart or find a fold line.
+    Midpoint {
+        name: String, // the point's user-facing label
+        p1: ObjectId, // the segment's first endpoint
+        p2: ObjectId, // the segment's second endpoint
     },
 }
 
@@ -297,6 +372,166 @@ impl Document {
             return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
         }
         let kind = ToolKind::Line { p1, p2 }; // both endpoints validated above
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point measured `length_formula` units from `p1`, continuing
+    /// along the p1->p2 direction.
+    ///
+    /// Same "validate immediately, only register on success" contract as
+    /// `add_end_line`/`add_line`: `p1` is checked before `p2`, and the
+    /// first missing id is reported, without touching `history` at all on
+    /// failure.
+    pub fn add_along_line(
+        &mut self,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+        length_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first, so a p1 failure is reported as p1's fault, not silently shadowed by a p2 check
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            // p1 was fine; now check p2 on its own
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        let kind = ToolKind::AlongLine {
+            name: name.into(), // convert the caller's name into an owned String
+            p1,                // already validated above
+            p2,                // already validated above
+            length_formula: length_formula.into(), // convert the caller's length formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point offset from `p1` perpendicular to the `p1`-`p2` line
+    /// (further rotated by `angle_formula` degrees), at `length_formula`
+    /// distance.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `p1` then `p2` in order.
+    pub fn add_normal(
+        &mut self,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+        length_formula: impl Into<String>,
+        angle_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first, so a p1 failure is reported as p1's fault, not silently shadowed by a p2 check
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            // p1 was fine; now check p2 on its own
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        let kind = ToolKind::Normal {
+            name: name.into(), // convert the caller's name into an owned String
+            p1,                // already validated above
+            p2,                // already validated above
+            length_formula: length_formula.into(), // convert the caller's length formula into an owned String
+            angle_formula: angle_formula.into(), // convert the caller's angle formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point along the bisector of the angle `p1`-`p2`-`p3` (`p2`
+    /// the vertex), at `length_formula` distance from `p2`.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `p1`, then `p2`, then `p3` in order — the ids are checked
+    /// in the exact order they appear in this method's signature, and the
+    /// first missing one is reported.
+    pub fn add_bisector(
+        &mut self,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+        p3: ObjectId,
+        length_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first: it's the first id in this method's signature
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            // p1 was fine; check p2 next, matching signature order
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        if !self.contains(p3) {
+            // p1 and p2 were fine; check p3 last, matching signature order
+            return Err(crate::PatternError::MissingDependency(p3)); // precise, actionable error naming p3
+        }
+        let kind = ToolKind::Bisector {
+            name: name.into(), // convert the caller's name into an owned String
+            p1,                // already validated above
+            p2,                // already validated above
+            p3,                // already validated above
+            length_formula: length_formula.into(), // convert the caller's length formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point: the perpendicular projection of `point` onto the line
+    /// through `line_p1`/`line_p2`.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `point`, then `line_p1`, then `line_p2` in order (the
+    /// order they appear in this method's signature).
+    pub fn add_height(
+        &mut self,
+        name: impl Into<String>,
+        point: ObjectId,
+        line_p1: ObjectId,
+        line_p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(point) {
+            // check `point` first: it's the first id in this method's signature
+            return Err(crate::PatternError::MissingDependency(point)); // precise, actionable error naming `point`
+        }
+        if !self.contains(line_p1) {
+            // `point` was fine; check `line_p1` next, matching signature order
+            return Err(crate::PatternError::MissingDependency(line_p1)); // precise, actionable error naming `line_p1`
+        }
+        if !self.contains(line_p2) {
+            // `point`/`line_p1` were fine; check `line_p2` last, matching signature order
+            return Err(crate::PatternError::MissingDependency(line_p2)); // precise, actionable error naming `line_p2`
+        }
+        let kind = ToolKind::Height {
+            name: name.into(), // convert the caller's name into an owned String
+            point,             // already validated above
+            line_p1,           // already validated above
+            line_p2,           // already validated above
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point exactly halfway between `p1` and `p2`.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `p1` then `p2` in order.
+    pub fn add_midpoint(
+        &mut self,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first, so a p1 failure is reported as p1's fault, not silently shadowed by a p2 check
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            // p1 was fine; now check p2 on its own
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        let kind = ToolKind::Midpoint {
+            name: name.into(),
+            p1,
+            p2,
+        }; // both endpoints validated above
         Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
     }
 
@@ -832,5 +1067,95 @@ mod tests {
 
         assert_eq!(err, DocumentError::DuplicateId(a));
         assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_along_line_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_along_line("N", a, bogus, "10").unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_normal_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_normal("N", a, bogus, "10", "0").unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_bisector_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 1.0, 1.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_bisector("N", a, b, bogus, "10").unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_height_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 1.0, 1.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_height("N", a, b, bogus).unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_midpoint_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_midpoint("N", a, bogus).unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    // Proves `references_of` was correctly extended for `Normal` in a real
+    // dependency chain, not just checked in isolation: A is used by the
+    // Normal tool N, and N is itself used by a downstream Line. Removing A
+    // must be blocked because N (not the Line) still depends on it.
+    #[test]
+    fn remove_tool_blocked_by_a_normal_tools_dependency() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 1.0, 1.0);
+        let n = doc.add_normal("N", a, b, "10", "0").unwrap(); // depends on both a and b
+        let c = doc.add_base_point("C", 5.0, 5.0);
+        doc.add_line(n, c).unwrap(); // a downstream tool depending on N, not directly on A
+
+        let err = doc.remove_tool(a).unwrap_err();
+        assert_eq!(err, DocumentError::ToolInUse { id: a, used_by: n });
+        assert!(doc.contains(a)); // the failed removal changed nothing
     }
 }

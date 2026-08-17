@@ -234,6 +234,107 @@ impl UndoStack {
         Ok(id) // hand back the new id, same as the underlying Document method
     }
 
+    /// Adds an `AlongLine` point to `doc` and records the edit.
+    ///
+    /// Same rationale as [`Self::do_add_end_line`] for why this returns
+    /// `crate::PatternError`, not `DocumentError`.
+    pub fn do_add_along_line(
+        &mut self,
+        doc: &mut Document,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+        length_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        let id = doc.add_along_line(name, p1, p2, length_formula)?; // perform the mutation first; propagate a validation failure without recording anything
+        if let Some(record) = doc.get_tool(id).cloned() {
+            // see do_add_base_point's comment above for why this is an `if let`, not an unwrap/expect
+            self.record(Edit::AddTool(record)); // record the edit only now that the mutation is known to have succeeded
+        }
+        Ok(id) // hand back the new id, same as the underlying Document method
+    }
+
+    /// Adds a `Normal` point to `doc` and records the edit.
+    ///
+    /// Same rationale as [`Self::do_add_end_line`] for why this returns
+    /// `crate::PatternError`, not `DocumentError`.
+    pub fn do_add_normal(
+        &mut self,
+        doc: &mut Document,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+        length_formula: impl Into<String>,
+        angle_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        let id = doc.add_normal(name, p1, p2, length_formula, angle_formula)?; // perform the mutation first; propagate a validation failure without recording anything
+        if let Some(record) = doc.get_tool(id).cloned() {
+            // see do_add_base_point's comment above for why this is an `if let`, not an unwrap/expect
+            self.record(Edit::AddTool(record)); // record the edit only now that the mutation is known to have succeeded
+        }
+        Ok(id) // hand back the new id, same as the underlying Document method
+    }
+
+    /// Adds a `Bisector` point to `doc` and records the edit.
+    ///
+    /// Same rationale as [`Self::do_add_end_line`] for why this returns
+    /// `crate::PatternError`, not `DocumentError`.
+    pub fn do_add_bisector(
+        &mut self,
+        doc: &mut Document,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+        p3: ObjectId,
+        length_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        let id = doc.add_bisector(name, p1, p2, p3, length_formula)?; // perform the mutation first; propagate a validation failure without recording anything
+        if let Some(record) = doc.get_tool(id).cloned() {
+            // see do_add_base_point's comment above for why this is an `if let`, not an unwrap/expect
+            self.record(Edit::AddTool(record)); // record the edit only now that the mutation is known to have succeeded
+        }
+        Ok(id) // hand back the new id, same as the underlying Document method
+    }
+
+    /// Adds a `Height` point to `doc` and records the edit.
+    ///
+    /// Same rationale as [`Self::do_add_end_line`] for why this returns
+    /// `crate::PatternError`, not `DocumentError`.
+    pub fn do_add_height(
+        &mut self,
+        doc: &mut Document,
+        name: impl Into<String>,
+        point: ObjectId,
+        line_p1: ObjectId,
+        line_p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        let id = doc.add_height(name, point, line_p1, line_p2)?; // perform the mutation first; propagate a validation failure without recording anything
+        if let Some(record) = doc.get_tool(id).cloned() {
+            // see do_add_base_point's comment above for why this is an `if let`, not an unwrap/expect
+            self.record(Edit::AddTool(record)); // record the edit only now that the mutation is known to have succeeded
+        }
+        Ok(id) // hand back the new id, same as the underlying Document method
+    }
+
+    /// Adds a `Midpoint` point to `doc` and records the edit.
+    ///
+    /// Same rationale as [`Self::do_add_end_line`] for why this returns
+    /// `crate::PatternError`, not `DocumentError`.
+    pub fn do_add_midpoint(
+        &mut self,
+        doc: &mut Document,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        let id = doc.add_midpoint(name, p1, p2)?; // perform the mutation first; propagate a validation failure without recording anything
+        if let Some(record) = doc.get_tool(id).cloned() {
+            // see do_add_base_point's comment above for why this is an `if let`, not an unwrap/expect
+            self.record(Edit::AddTool(record)); // record the edit only now that the mutation is known to have succeeded
+        }
+        Ok(id) // hand back the new id, same as the underlying Document method
+    }
+
     /// Removes a tool from `doc` and records the edit.
     pub fn do_remove_tool(
         &mut self,
@@ -423,5 +524,55 @@ mod tests {
         assert!(undone);
         let result_after_undo = recompute_all(&doc).unwrap();
         assert_eq!(result_after_undo, result_before); // undo -> recompute reproduces the original geometry exactly
+    }
+
+    #[test]
+    fn undo_redo_along_line_matches_pre_and_post_add_recompute() {
+        let mut doc = Document::default();
+        let mut stack = UndoStack::default();
+
+        let p1 = stack.do_add_base_point(&mut doc, "P1", 0.0, 0.0);
+        let p2 = stack.do_add_base_point(&mut doc, "P2", 3.0, 4.0);
+        let before_add = recompute_all(&doc).unwrap(); // resolved geometry with only P1/P2, before AlongLine exists
+
+        let along = stack
+            .do_add_along_line(&mut doc, "AL", p1, p2, "10")
+            .unwrap();
+        let after_add = recompute_all(&doc).unwrap();
+        assert!(after_add.get_point(along).is_ok()); // the new point actually resolved
+
+        let undone = stack.undo(&mut doc).unwrap();
+        assert!(undone);
+        let after_undo = recompute_all(&doc).unwrap();
+        assert_eq!(after_undo, before_add); // undo -> recompute matches the pre-add state exactly
+
+        let redone = stack.redo(&mut doc).unwrap();
+        assert!(redone);
+        let after_redo = recompute_all(&doc).unwrap();
+        assert_eq!(after_redo, after_add); // redo -> recompute matches the post-add state exactly
+    }
+
+    #[test]
+    fn undo_redo_midpoint_matches_pre_and_post_add_recompute() {
+        let mut doc = Document::default();
+        let mut stack = UndoStack::default();
+
+        let p1 = stack.do_add_base_point(&mut doc, "P1", 1.0, 3.0);
+        let p2 = stack.do_add_base_point(&mut doc, "P2", 7.0, 9.0);
+        let before_add = recompute_all(&doc).unwrap(); // resolved geometry with only P1/P2, before Midpoint exists
+
+        let mid = stack.do_add_midpoint(&mut doc, "M", p1, p2).unwrap();
+        let after_add = recompute_all(&doc).unwrap();
+        assert!(after_add.get_point(mid).is_ok()); // the new point actually resolved
+
+        let undone = stack.undo(&mut doc).unwrap();
+        assert!(undone);
+        let after_undo = recompute_all(&doc).unwrap();
+        assert_eq!(after_undo, before_add); // undo -> recompute matches the pre-add state exactly
+
+        let redone = stack.redo(&mut doc).unwrap();
+        assert!(redone);
+        let after_redo = recompute_all(&doc).unwrap();
+        assert_eq!(after_redo, after_add); // redo -> recompute matches the post-add state exactly
     }
 }

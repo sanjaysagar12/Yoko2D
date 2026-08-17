@@ -8,6 +8,13 @@ use crate::variable::{Variable, VariableKind};
 /// The equivalent of Seamly2D's `VContainer`: a store mapping numeric ids to
 /// geometric objects and string names to variables (measurements, custom
 /// variables, derived lengths/angles).
+///
+/// Fields are private on purpose — `objects`/`variables`/`next_id` are
+/// implementation details of "how the container tracks things", not part of
+/// its API. All access goes through the methods below so invariants like
+/// "ids are never reused" and "every stored object is reachable by exactly
+/// one id" stay enforced in one place instead of being the caller's
+/// responsibility.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PatternData {
     objects: HashMap<ObjectId, GeoObject>,
@@ -16,6 +23,12 @@ pub struct PatternData {
 }
 
 impl PatternData {
+    /// Stores `obj` under a freshly allocated id and returns that id.
+    ///
+    /// Ids are handed out from a strictly increasing counter, so every id
+    /// this returns is guaranteed unused — nothing is ever overwritten by
+    /// accident, and (short of `clear_objects`/`clear_all`) no id is ever
+    /// reused even after its object is removed.
     pub fn add_object(&mut self, obj: GeoObject) -> ObjectId {
         let id = ObjectId::new(self.next_id);
         self.next_id += 1;
@@ -23,6 +36,13 @@ impl PatternData {
         id
     }
 
+    /// Looks up `id` expecting it to hold a [`PointData`].
+    ///
+    /// Distinguishes the two ways this can fail: `id` isn't in the
+    /// container at all (`ObjectNotFound`), versus `id` is valid but names
+    /// something that isn't a point, e.g. a line (`WrongObjectType`). Both
+    /// are returned as `Err` rather than panicking — see the crate-level
+    /// `#![deny(clippy::unwrap_used, ...)]` for why that matters here.
     pub fn get_point(&self, id: ObjectId) -> Result<&PointData, ContainerError> {
         match self.objects.get(&id) {
             Some(GeoObject::Point(point)) => Ok(point),
@@ -34,6 +54,10 @@ impl PatternData {
         }
     }
 
+    /// Looks up `id` expecting it to hold a [`LineData`].
+    ///
+    /// Same not-found/wrong-type distinction as [`Self::get_point`], mirrored
+    /// for the `Line` variant.
     pub fn get_line(&self, id: ObjectId) -> Result<&LineData, ContainerError> {
         match self.objects.get(&id) {
             Some(GeoObject::Line(line)) => Ok(line),
@@ -45,6 +69,12 @@ impl PatternData {
         }
     }
 
+    /// Removes and returns the object stored at `id`, if any.
+    ///
+    /// Note this does *not* roll back the id counter — the freed id is
+    /// simply gone, never reissued by a later `add_object`. That's what
+    /// keeps an `ObjectId` a caller is still holding onto from ever silently
+    /// starting to point at a different, unrelated object.
     pub fn remove_object(&mut self, id: ObjectId) -> Option<GeoObject> {
         self.objects.remove(&id)
     }
@@ -62,16 +92,37 @@ impl PatternData {
         self.variables.insert(name.into(), var);
     }
 
+    /// Looks up the variable registered under `name`.
+    ///
+    /// Returns `VariableNotFound` rather than `Option::None` (unlike
+    /// `remove_object`) because a missing variable during formula evaluation
+    /// is meant to surface as a proper error the caller can report, not be
+    /// silently treated as "no value" — there is no sensible default for a
+    /// measurement or custom variable that was never defined.
     pub fn get_variable(&self, name: &str) -> Result<&Variable, ContainerError> {
         self.variables
             .get(name)
             .ok_or_else(|| ContainerError::VariableNotFound(name.to_string()))
     }
 
+    /// Removes every variable whose [`Variable::kind`] equals `kind`,
+    /// leaving all others untouched.
+    ///
+    /// Modeled on the original app's measurement-reload flow: re-importing a
+    /// `.vit`/`.smis` file needs to drop *only* the old `Measurement`
+    /// variables and replace them, without disturbing `Custom` variables or
+    /// derived lengths/angles that the user's formulas still depend on.
     pub fn clear_variables(&mut self, kind: VariableKind) {
         self.variables.retain(|_, var| var.kind() != kind);
     }
 
+    /// Empties the object map and resets the id counter.
+    ///
+    /// Resetting `next_id` (not just clearing `objects`) is what makes this
+    /// different from removing every object one at a time: afterward, the
+    /// container hands out ids starting from the same point a brand-new
+    /// `PatternData` would, rather than continuing to climb from wherever it
+    /// left off.
     pub fn clear_objects(&mut self) {
         self.objects.clear();
         // 0 matches the `next_id` a derived `Default::default()` produces,
@@ -79,6 +130,13 @@ impl PatternData {
         self.next_id = 0;
     }
 
+    /// Resets the container to its just-created state: clears every object
+    /// (and the id counter with it, via [`Self::clear_objects`]) and every
+    /// variable, regardless of kind.
+    ///
+    /// Deliberately clears variables directly rather than calling
+    /// `clear_variables` once per `VariableKind` — "all kinds" isn't really
+    /// a kind-based filter, it's the absence of one.
     pub fn clear_all(&mut self) {
         self.clear_objects();
         self.variables.clear();
@@ -89,6 +147,8 @@ impl PatternData {
 mod tests {
     use super::*;
 
+    // Basic round-trip: insert a Point and a Line, read them back through
+    // the typed getters, and check the values match exactly.
     #[test]
     fn add_and_get_point_and_line() {
         let mut data = PatternData::default();
@@ -105,6 +165,9 @@ mod tests {
         assert_eq!(line_data.p2, p2);
     }
 
+    // A valid id that names the *other* variant must be reported as
+    // WrongObjectType, not ObjectNotFound — the id isn't missing, it's just
+    // pointing at the wrong kind of thing.
     #[test]
     fn get_line_on_point_id_returns_wrong_object_type() {
         let mut data = PatternData::default();
@@ -131,6 +194,10 @@ mod tests {
         ));
     }
 
+    // `real` is removed after being allocated so the id is guaranteed to
+    // have never existed in the container by the time it's looked up,
+    // exercising ObjectNotFound rather than an id that was simply never
+    // issued in the first place.
     #[test]
     fn get_point_on_nonexistent_id_returns_object_not_found() {
         let mut data = PatternData::default();
@@ -151,6 +218,9 @@ mod tests {
         assert_eq!(err, ContainerError::ObjectNotFound(real));
     }
 
+    // Checks both that ids strictly increase (windows(2) pairwise) and that
+    // none repeat (sort + dedup shouldn't drop anything) — increasing alone
+    // wouldn't catch a counter that stalled or wrapped.
     #[test]
     fn next_id_increases_strictly_across_add_object_calls() {
         let mut data = PatternData::default();
@@ -173,6 +243,9 @@ mod tests {
         assert_eq!(unique.len(), ids.len());
     }
 
+    // Compares against a brand-new PatternData's first id rather than a
+    // hardcoded literal, so this test keeps working even if the counter's
+    // starting value ever changes.
     #[test]
     fn clear_objects_resets_id_counter_to_initial_value() {
         let mut fresh = PatternData::default();
@@ -197,6 +270,9 @@ mod tests {
         assert_eq!(var, &Variable::Measurement { value: 72.5 });
     }
 
+    // Mixes Measurement, Custom, and LineLength variables so clearing one
+    // kind can be checked from both directions: the targeted kind is gone,
+    // and the untargeted kinds survive completely unchanged.
     #[test]
     fn clear_variables_removes_only_matching_kind() {
         let mut data = PatternData::default();
@@ -234,6 +310,10 @@ mod tests {
         );
     }
 
+    // If `Clone` were shallow (e.g. an Rc-shared map), adding to the clone
+    // would be visible from `original` too. Asserting the original still
+    // can't see the new id proves the clone owns an independent copy of the
+    // container's state.
     #[test]
     fn cloning_pattern_data_is_deep_and_independent() {
         let original = PatternData::default();

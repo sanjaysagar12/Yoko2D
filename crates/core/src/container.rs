@@ -105,6 +105,17 @@ impl PatternData {
             .ok_or_else(|| ContainerError::VariableNotFound(name.to_string()))
     }
 
+    /// Iterates every `(name, Variable)` pair currently stored, in
+    /// unspecified order (the same order `HashMap::iter` yields).
+    ///
+    /// Exists so callers like the formula engine's `flatten_variables` can
+    /// build their own view of the whole variable table (e.g. a flat
+    /// `name -> f64` map) without `PatternData` needing to know anything
+    /// about what they'll do with it.
+    pub fn variables(&self) -> impl Iterator<Item = (&String, &Variable)> {
+        self.variables.iter()
+    }
+
     /// Removes every variable whose [`Variable::kind`] equals `kind`,
     /// leaving all others untouched.
     ///
@@ -326,6 +337,17 @@ mod tests {
             ContainerError::ObjectNotFound(new_id)
         );
         assert!(clone.get_point(new_id).is_ok());
+    }
+
+    #[test]
+    fn variables_iterates_every_stored_pair() {
+        let mut data = PatternData::default();
+        data.add_variable("waist", Variable::Measurement { value: 70.0 });
+        data.add_variable("seam_len", Variable::LineLength { value: 12.0 });
+
+        let mut names: Vec<&String> = data.variables().map(|(name, _)| name).collect();
+        names.sort();
+        assert_eq!(names, vec!["seam_len", "waist"]);
     }
 
     #[test]

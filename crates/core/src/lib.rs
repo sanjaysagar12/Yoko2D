@@ -30,13 +30,3 @@ pub use variable::{Variable, VariableKind};
 pub struct Document {
     pub note: String,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn formula_placeholder_text() {
-        assert_eq!(formula::placeholder(), "formula engine not yet implemented");
-    }
-}

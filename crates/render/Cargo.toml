@@ -3,5 +3,14 @@ name = "render"
 version.workspace = true
 edition.workspace = true
 
+# Aliased to `core_lib`, not the plain `core = { path = "../core" }` used
+# before this crate had any code of its own: this crate now uses
+# `thiserror::Error` (in `lib.rs`), whose derive macro expands to code
+# referencing bare `core::fmt`/`core::write` paths. Binding this dependency
+# to the name `core` would shadow the real sysroot `core` crate in this
+# crate's extern prelude and break that macro expansion — the same issue
+# `crates/io/Cargo.toml` and `crates/app/Cargo.toml` document and work
+# around the same way.
 [dependencies]
-core = { path = "../core" }
+core_lib = { package = "core", path = "../core" }
+thiserror.workspace = true

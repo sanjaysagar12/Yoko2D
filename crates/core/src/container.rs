@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap; // ordered map for `objects`, see the field comment below
+use std::collections::HashMap; // still used for `variables`, which has no ordering requirement
 
 use crate::error::ContainerError;
 use crate::geo::{GeoObject, LineData, PointData};
@@ -17,7 +18,17 @@ use crate::variable::{Variable, VariableKind};
 /// responsibility.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PatternData {
-    objects: HashMap<ObjectId, GeoObject>,
+    // A `BTreeMap`, not a `HashMap`: `ObjectId` already derives `Ord` (Phase
+    // 1), and `BTreeMap` iterates its entries in ascending key order,
+    // deterministically, every time — unlike `HashMap`, whose iteration
+    // order is randomized per process run by design (to resist
+    // hash-flooding attacks) and can even differ between two iterations
+    // within the same run after a resize. The Phase 7 `render` crate walks
+    // this map to produce a `Vec<DrawCommand>`, and stable, non-flickering
+    // draw output across frames depends on that walk always visiting
+    // objects in the same order — a `HashMap` here would make rendering
+    // order essentially random.
+    objects: BTreeMap<ObjectId, GeoObject>,
     variables: HashMap<String, Variable>,
     next_id: u32,
 }
@@ -106,6 +117,17 @@ impl PatternData {
     /// starting to point at a different, unrelated object.
     pub fn remove_object(&mut self, id: ObjectId) -> Option<GeoObject> {
         self.objects.remove(&id)
+    }
+
+    /// Iterates every `(id, GeoObject)` pair currently stored, in
+    /// ascending `ObjectId` order.
+    ///
+    /// That ordering is guaranteed, not incidental: `objects` is a
+    /// `BTreeMap` (see the field comment above) specifically so this
+    /// iteration order is deterministic and stable across calls, which the
+    /// `render` crate depends on to produce non-flickering draw output.
+    pub fn objects(&self) -> impl Iterator<Item = (&ObjectId, &GeoObject)> {
+        self.objects.iter() // BTreeMap::iter always yields entries in ascending key order
     }
 
     /// Inserts `var` under `name`, overwriting any existing variable with
@@ -407,6 +429,39 @@ mod tests {
         // a subsequent auto-allocated id must not collide with the manually-inserted one
         let next = data.add_object(GeoObject::Point(PointData { x: 2.0, y: 2.0 }));
         assert!(next.raw() > 10);
+    }
+
+    // Uses insert_with_id (pub(crate), so this coverage has to live in
+    // core's own test suite rather than render's) to insert ids in
+    // descending order — the opposite of BTreeMap's ascending iteration
+    // order — and confirms `objects()` still yields them ascending. This
+    // is the primitive `render::render` relies on for stable draw order;
+    // proving it here means render's own tests don't need to reach into
+    // core's pub(crate) internals to exercise the same guarantee.
+    #[test]
+    fn objects_iterates_in_ascending_id_order_regardless_of_insertion_order() {
+        let mut data = PatternData::default();
+        data.insert_with_id(
+            ObjectId::new(30),
+            GeoObject::Point(PointData { x: 3.0, y: 3.0 }),
+        )
+        .unwrap();
+        data.insert_with_id(
+            ObjectId::new(10),
+            GeoObject::Point(PointData { x: 1.0, y: 1.0 }),
+        )
+        .unwrap();
+        data.insert_with_id(
+            ObjectId::new(20),
+            GeoObject::Point(PointData { x: 2.0, y: 2.0 }),
+        )
+        .unwrap();
+
+        let ids: Vec<ObjectId> = data.objects().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![ObjectId::new(10), ObjectId::new(20), ObjectId::new(30)]
+        );
     }
 
     #[test]

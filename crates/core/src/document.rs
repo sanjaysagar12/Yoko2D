@@ -2,7 +2,7 @@ use std::collections::HashMap; // backs `base_variables`, the same collection ty
 use std::collections::HashSet; // backs `history_ids`, an O(1) existence index parallel to `history`
 
 use crate::id::ObjectId; // the id type every tool record and geometric reference is built from
-use crate::variable::Variable; // the variable payload type stored in `base_variables`
+use crate::variable::{Variable, VariableKind}; // the variable payload type, and its kind tag used to filter measurements out
 
 /// One entry in a [`Document`]'s ordered tool history: the id it was
 /// assigned when added, plus what kind of tool it is.
@@ -95,6 +95,42 @@ impl Document {
     /// stale duplicates alongside it.
     pub fn set_variable(&mut self, name: impl Into<String>, var: Variable) {
         self.base_variables.insert(name.into(), var); // overwrite (or newly insert) the entry for this name
+    }
+
+    /// Removes every entry from `base_variables` whose [`Variable::kind`]
+    /// is [`VariableKind::Measurement`], leaving all other kinds (`Custom`,
+    /// `LineLength`, etc.) untouched.
+    ///
+    /// Ports the same filtering approach as
+    /// [`crate::PatternData::clear_variables`] (Phase 1), just applied to
+    /// `Document`'s own `base_variables` map instead of `PatternData`'s.
+    /// Private: the only caller is [`Self::apply_measurements`] below,
+    /// which always follows this with a fresh load — there's no standalone
+    /// use case for clearing measurements without also reloading them.
+    fn clear_measurement_variables(&mut self) {
+        self.base_variables
+            .retain(|_, var| var.kind() != VariableKind::Measurement); // keep everything except Measurement-kind entries
+    }
+
+    /// Replaces every currently-loaded measurement with the contents of
+    /// `measurements`.
+    ///
+    /// This is "replace, not merge" on purpose, mirroring
+    /// `MeasurementDoc::readMeasurements()`'s "clear then reload" semantics
+    /// in the original C++ app: `clear_measurement_variables` runs first so
+    /// a name present in the *previous* file but absent from this one
+    /// doesn't linger with its stale value — reloading a smaller or
+    /// different measurement file must make the old, no-longer-present
+    /// names genuinely disappear, not just get shadowed by later entries
+    /// that happen not to overwrite them. Custom/derived variables are
+    /// untouched, since `clear_measurement_variables` only removes
+    /// `Measurement`-kind entries.
+    pub fn apply_measurements(&mut self, measurements: std::collections::HashMap<String, f64>) {
+        self.clear_measurement_variables(); // drop every previously loaded measurement before loading the new ones
+        for (name, value) in measurements {
+            // walk the freshly parsed measurement map, in whatever order the HashMap yields it
+            self.set_variable(name, Variable::Measurement { value }); // set_variable's overwrite semantics naturally handle insertion here
+        }
     }
 
     /// Returns the full tool history, in the order tools were added.
@@ -421,5 +457,76 @@ mod tests {
             .map(|(_, var)| var)
             .collect();
         assert_eq!(stored, vec![&Variable::Measurement { value: 72.5 }]);
+    }
+
+    #[test]
+    fn apply_measurements_feeds_the_full_pipeline_to_resolved_geometry() {
+        let mut doc = Document::default();
+        let mut measurements = HashMap::new();
+        measurements.insert("height_scapula".to_string(), 40.0);
+        doc.apply_measurements(measurements);
+
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let a1 = doc.add_end_line("A1", a, "0", "height_scapula/10").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(a1).unwrap();
+        assert!((point.x - 4.0).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_measurements_replaces_rather_than_merges() {
+        let mut doc = Document::default();
+        let mut first = HashMap::new();
+        first.insert("height_scapula".to_string(), 40.0);
+        first.insert("waist_circ".to_string(), 72.5);
+        doc.apply_measurements(first);
+
+        let mut second = HashMap::new();
+        second.insert("waist_circ".to_string(), 70.0); // "height_scapula" deliberately absent this time
+        doc.apply_measurements(second);
+
+        // Not merely shadowed: the name must be genuinely gone from the variable table.
+        let still_present = doc
+            .base_variables()
+            .any(|(name, _)| name == "height_scapula");
+        assert!(!still_present);
+
+        // Confirm through the formula engine too: a tool referencing the
+        // now-missing name must fail to recompute rather than resolve
+        // against a stale cached value.
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        doc.add_end_line("A1", a, "0", "height_scapula/10").unwrap();
+        let err = recompute_all(&doc).unwrap_err();
+        assert!(matches!(err, PatternError::Formula(_)));
+    }
+
+    #[test]
+    fn apply_measurements_only_clears_measurement_kind_variables() {
+        let mut doc = Document::default();
+        doc.set_variable(
+            "half_waist",
+            Variable::Custom {
+                formula: "waist_circ / 2".to_string(),
+                cached_value: 36.25,
+            },
+        );
+
+        let mut measurements = HashMap::new();
+        measurements.insert("waist_circ".to_string(), 72.5);
+        doc.apply_measurements(measurements);
+
+        let custom = doc
+            .base_variables()
+            .find(|(name, _)| *name == "half_waist")
+            .map(|(_, var)| var.clone());
+        assert_eq!(
+            custom,
+            Some(Variable::Custom {
+                formula: "waist_circ / 2".to_string(),
+                cached_value: 36.25,
+            })
+        );
     }
 }

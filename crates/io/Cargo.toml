@@ -3,8 +3,17 @@ name = "io"
 version.workspace = true
 edition.workspace = true
 
+# The dependency on the `core` package is aliased to `core_lib` here (instead
+# of the usual bare `core = { path = "../core" }`) because this crate uses
+# `thiserror::Error`, whose derive macro expands to code referencing bare
+# `core::fmt`/`core::write` paths. If Cargo bound this dependency to the name
+# `core`, that would collide with (and shadow) the real sysroot `core` crate
+# in this crate's extern prelude, causing thiserror's generated code to fail
+# to resolve `core::fmt` at all — see `crates/core/Cargo.toml`'s `doctest =
+# false` comment for the same root cause hitting `core`'s own doctests.
+# Aliasing to `core_lib` here sidesteps the collision entirely.
 [dependencies]
-core = { path = "../core" }
+core_lib = { package = "core", path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

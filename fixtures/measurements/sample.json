@@ -1,0 +1,6 @@
+{
+  "measurements": [
+    { "name": "height_scapula", "value": 40.0, "description": "Scapula height" },
+    { "name": "waist_circ", "value": 72.5 }
+  ]
+}

@@ -1,4 +1,5 @@
 use std::collections::HashMap; // backs `base_variables`, the same collection type `PatternData` uses for variables
+use std::collections::HashSet; // backs `history_ids`, an O(1) existence index parallel to `history`
 
 use crate::id::ObjectId; // the id type every tool record and geometric reference is built from
 use crate::variable::Variable; // the variable payload type stored in `base_variables`
@@ -60,9 +61,10 @@ pub enum ToolKind {
 /// Its own `next_id` counter (separate from `PatternData`'s) is what makes
 /// ids stable across recomputes: a `PatternData` gets rebuilt every time,
 /// but a `ToolRecord`'s id, once assigned, never changes.
-#[derive(Debug, Clone, PartialEq, Default)] // Default gives an empty history, empty variables, and next_id starting at 0 — an empty pattern
+#[derive(Debug, Clone, PartialEq, Default)] // Default gives an empty history, empty ids, empty variables, and next_id starting at 0 — an empty pattern
 pub struct Document {
     history: Vec<ToolRecord>, // every tool added so far, in the exact order it was added
+    history_ids: HashSet<ObjectId>, // every id ever allocated by this Document, for O(1) "does this id exist" checks
     base_variables: HashMap<String, Variable>, // measurements/custom variables formulas can reference, independent of any tool
     next_id: u32, // this Document's own id counter; distinct from any PatternData's, since PatternData is rebuilt from scratch each recompute
 }
@@ -79,6 +81,7 @@ impl Document {
     pub fn add_tool(&mut self, kind: ToolKind) -> ObjectId {
         let id = ObjectId::new(self.next_id); // allocate the next id from this Document's own counter
         self.next_id += 1; // advance the counter so the next add_tool call gets a different id
+        self.history_ids.insert(id); // record the id as allocated, so `contains` can answer instantly without scanning history
         self.history.push(ToolRecord { id, kind }); // record this tool, in order, at the end of the history
         id // hand the newly assigned id back to the caller
     }
@@ -103,6 +106,97 @@ impl Document {
     /// matters).
     pub fn history(&self) -> &[ToolRecord] {
         &self.history // borrow out the backing Vec as a slice, so callers can't push/remove through this accessor
+    }
+
+    /// Returns whether `id` has ever been allocated by this Document (via
+    /// `add_tool` or one of the `add_*` convenience constructors below).
+    ///
+    /// An O(1) lookup into `history_ids`, deliberately separate from
+    /// `recompute_all`'s validation: this lets a caller (e.g. a GUI tool
+    /// about to create an `EndLine`) check "does this dependency exist"
+    /// *before* appending anything to history, instead of only finding out
+    /// after a full recompute.
+    pub fn contains(&self, id: ObjectId) -> bool {
+        self.history_ids.contains(&id) // O(1) set membership check
+    }
+
+    /// Looks up the [`ToolRecord`] with the given `id`, if this Document
+    /// has one.
+    ///
+    /// A plain linear scan over `history` — simple and correct, and at
+    /// this stage of the project not worth a second `HashMap<ObjectId,
+    /// usize>` index just to make it O(1); `history` isn't expected to be
+    /// large enough yet for that tradeoff to matter.
+    pub fn get_tool(&self, id: ObjectId) -> Option<&ToolRecord> {
+        self.history.iter().find(|record| record.id == id) // scan for the first (and only, since ids never repeat) matching record
+    }
+
+    /// Adds a literal starting point with no dependencies.
+    ///
+    /// Mirrors `VToolLine::Create`'s contract of "validate immediately,
+    /// only register on success" — trivially here, since a `BasePoint` has
+    /// no referenced ids to validate, so this can never fail and returns a
+    /// bare `ObjectId` rather than a `Result`.
+    pub fn add_base_point(&mut self, name: impl Into<String>, x: f64, y: f64) -> ObjectId {
+        let kind = ToolKind::BasePoint {
+            name: name.into(),
+            x,
+            y,
+        }; // build the tool's data; nothing here can be invalid
+        self.add_tool(kind) // register it and hand back the id it was assigned
+    }
+
+    /// Adds a point at `angle_formula` degrees and `length_formula` units
+    /// from `base_point`.
+    ///
+    /// Mirrors `VToolLine::Create`'s contract of "validate immediately,
+    /// only register on success": `base_point` is checked against this
+    /// Document's known ids *before* anything is appended to `history`, so
+    /// a bad reference fails loudly right away instead of surfacing only
+    /// on the next `recompute_all`, and leaves history completely
+    /// unchanged on failure.
+    pub fn add_end_line(
+        &mut self,
+        name: impl Into<String>,
+        base_point: ObjectId,
+        angle_formula: impl Into<String>,
+        length_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(base_point) {
+            // `base_point` isn't a real id from this Document: refuse before touching history
+            return Err(crate::PatternError::MissingDependency(base_point)); // precise, actionable error naming the bad reference
+        }
+        let kind = ToolKind::EndLine {
+            name: name.into(), // convert the caller's name into an owned String
+            base_point,        // already validated above
+            angle_formula: angle_formula.into(), // convert the caller's angle formula into an owned String
+            length_formula: length_formula.into(), // convert the caller's length formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a straight line between two existing points.
+    ///
+    /// Mirrors `VToolLine::Create`'s contract of "validate immediately,
+    /// only register on success": both `p1` and `p2` are checked against
+    /// this Document's known ids *before* anything is appended to
+    /// `history`, `p1` first so a failure reports exactly which one was
+    /// bad rather than always blaming `p2`.
+    pub fn add_line(
+        &mut self,
+        p1: ObjectId,
+        p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first, so a p1 failure is reported as p1's fault, not silently shadowed by a p2 check
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            // p1 was fine; now check p2 on its own
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        let kind = ToolKind::Line { p1, p2 }; // both endpoints validated above
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
     }
 
     /// Iterates every `(name, Variable)` pair in the base variable table,
@@ -133,6 +227,147 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{recompute_all, PatternError};
+
+    #[test]
+    fn add_base_point_registers_id_immediately() {
+        let mut doc = Document::default();
+        let id = doc.add_base_point("A", 1.0, 2.0);
+        assert!(doc.contains(id));
+    }
+
+    #[test]
+    fn add_line_between_two_valid_points_succeeds() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 1.0, 1.0);
+
+        let line = doc.add_line(a, b).unwrap();
+        assert!(line > a);
+        assert!(line > b);
+    }
+
+    #[test]
+    fn add_line_with_unknown_second_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_line(a, bogus).unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_end_line_with_unknown_base_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_end_line("A1", bogus, "0", "10").unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_end_line_with_valid_base_point_succeeds() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let result = doc.add_end_line("A1", a, "0", "10");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn get_tool_finds_records_created_by_each_constructor() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 1.0, 2.0);
+        let a1 = doc.add_end_line("A1", a, "0", "10").unwrap();
+        let line = doc.add_line(a, a1).unwrap();
+
+        assert!(matches!(
+            doc.get_tool(a).unwrap().kind,
+            ToolKind::BasePoint { x, y, .. } if x == 1.0 && y == 2.0
+        ));
+        assert!(matches!(
+            doc.get_tool(a1).unwrap().kind,
+            ToolKind::EndLine { base_point, .. } if base_point == a
+        ));
+        assert!(matches!(
+            doc.get_tool(line).unwrap().kind,
+            ToolKind::Line { p1, p2 } if p1 == a && p2 == a1
+        ));
+    }
+
+    #[test]
+    fn get_tool_returns_none_for_an_id_never_created() {
+        let doc = Document::default();
+        assert!(doc.get_tool(ObjectId::new(123)).is_none());
+    }
+
+    #[test]
+    fn full_cascade_via_ergonomic_constructors_matches_expected_geometry() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        doc.set_variable("height_scapula", Variable::Measurement { value: 40.0 });
+        let a1 = doc.add_end_line("A1", a, "0", "height_scapula/10").unwrap();
+        let line = doc.add_line(a, a1).unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let resolved_line = data.get_line(line).unwrap();
+
+        let p1 = data.get_point(resolved_line.p1).unwrap();
+        assert!((p1.x - 0.0).abs() < 1e-9);
+        assert!((p1.y - 0.0).abs() < 1e-9);
+
+        let p2 = data.get_point(resolved_line.p2).unwrap();
+        assert!((p2.x - 4.0).abs() < 1e-9);
+        assert!((p2.y - 0.0).abs() < 1e-9);
+    }
+
+    // Builds two structurally identical Documents (BasePoint "A" at the
+    // origin, BasePoint "B" at a different literal x, then a Line from A
+    // to B), differing only in B's literal x. Proves geometry is always
+    // freshly derived from the BasePoint's current literal values on
+    // recompute, never cached on the Line record itself.
+    #[test]
+    fn recompute_never_caches_stale_geometry_on_the_line_record() {
+        let mut doc_10 = Document::default();
+        let a10 = doc_10.add_base_point("A", 0.0, 0.0);
+        let b10 = doc_10.add_base_point("B", 10.0, 0.0);
+        let line_10 = doc_10.add_line(a10, b10).unwrap();
+
+        let mut doc_20 = Document::default();
+        let a20 = doc_20.add_base_point("A", 0.0, 0.0);
+        let b20 = doc_20.add_base_point("B", 20.0, 0.0);
+        let line_20 = doc_20.add_line(a20, b20).unwrap();
+
+        // Both Documents' Line records have the same structural shape: a
+        // Line referencing exactly two known ids.
+        assert!(matches!(
+            doc_10.get_tool(line_10).unwrap().kind,
+            ToolKind::Line { .. }
+        ));
+        assert!(matches!(
+            doc_20.get_tool(line_20).unwrap().kind,
+            ToolKind::Line { .. }
+        ));
+
+        let data_10 = recompute_all(&doc_10).unwrap();
+        let data_20 = recompute_all(&doc_20).unwrap();
+
+        let resolved_10 = data_10.get_line(line_10).unwrap();
+        let endpoint_10 = data_10.get_point(resolved_10.p2).unwrap();
+        assert!((endpoint_10.x - 10.0).abs() < 1e-9);
+
+        let resolved_20 = data_20.get_line(line_20).unwrap();
+        let endpoint_20 = data_20.get_point(resolved_20.p2).unwrap();
+        assert!((endpoint_20.x - 20.0).abs() < 1e-9);
+    }
 
     #[test]
     fn add_tool_returns_strictly_increasing_never_repeating_ids() {

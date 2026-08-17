@@ -16,6 +16,7 @@ pub mod formula;
 pub mod geo;
 pub mod id;
 pub mod recompute;
+pub mod undo;
 pub mod variable;
 
 pub use container::PatternData;
@@ -24,4 +25,5 @@ pub use error::ContainerError;
 pub use geo::{GeoObject, LineData, PointData};
 pub use id::ObjectId;
 pub use recompute::{recompute_all, PatternError};
+pub use undo::{Edit, UndoStack};
 pub use variable::{Variable, VariableKind};

@@ -19,6 +19,54 @@ pub enum DocumentError {
     /// `Document` itself as it was built.
     #[error("duplicate object id {0:?} in restored history")]
     DuplicateId(ObjectId), // the id that appeared more than once
+
+    /// [`Document::remove_tool`] was asked to remove a tool that some
+    /// other, still-present tool depends on (per [`references_of`]).
+    /// Refusing this is what keeps every reference in `history` always
+    /// resolvable — a later `recompute_all` should never have to discover
+    /// a dangling reference that `Document` itself could have prevented.
+    #[error("tool {id:?} cannot be removed: still used by {used_by:?}")]
+    ToolInUse {
+        id: ObjectId,      // the tool that was asked to be removed
+        used_by: ObjectId, // the other tool that still references it
+    },
+
+    /// [`Document::replace_tool_kind`] was asked to install a `ToolKind`
+    /// that references an id not present in this `Document`. Named and
+    /// shaped identically to [`crate::PatternError::MissingDependency`]
+    /// (same underlying id, same "the reference doesn't exist" meaning),
+    /// kept as a separate variant here because it's `Document`'s own
+    /// mutation-validation failing, not a `recompute_all` failure.
+    #[error("missing dependency: object {0:?} does not exist in this document")]
+    MissingDependency(ObjectId), // the referenced id that doesn't exist in this document
+
+    /// [`Document::remove_tool`]/[`Document::replace_tool_kind`] were
+    /// asked to act on an id that isn't actually present in `history`.
+    /// Should be unreachable in normal use (callers are expected to check
+    /// [`Document::contains`] first, the same convention `add_end_line`/
+    /// `add_line` already follow), but returned rather than panicking or
+    /// indexing unsafely if it somehow happens anyway.
+    #[error("no tool with id {0:?} exists in this document")]
+    ToolNotFound(ObjectId), // the id that was looked up and not found in history
+}
+
+/// Returns every `ObjectId` that `kind` depends on: none for a
+/// [`ToolKind::BasePoint`], `base_point` for an [`ToolKind::EndLine`], or
+/// `p1`/`p2` for a [`ToolKind::Line`].
+///
+/// A plain function, not a method, since it only needs the `ToolKind`
+/// itself, not any `Document` state. Shared by [`Document::remove_tool`]
+/// (to check whether removing a tool would orphan a dependent) and
+/// [`Document::replace_tool_kind`] (to validate a replacement kind's own
+/// references before committing it) — factored out so this match doesn't
+/// have to be kept in sync by hand in two separate places.
+fn references_of(kind: &ToolKind) -> Vec<ObjectId> {
+    match kind {
+        // dispatch on which kind of tool this is
+        ToolKind::BasePoint { .. } => Vec::new(), // no dependencies: a literal starting point
+        ToolKind::EndLine { base_point, .. } => vec![*base_point], // depends on exactly one earlier point
+        ToolKind::Line { p1, p2 } => vec![*p1, *p2], // depends on exactly two earlier points
+    }
 }
 
 /// One entry in a [`Document`]'s ordered tool history: the id it was
@@ -294,6 +342,113 @@ impl Document {
             base_variables,      // adopt the caller-supplied variable table as-is
             next_id: max_id + 1, // ensures a later add_tool on this restored Document never collides with any id loaded from the file
         })
+    }
+
+    /// Removes the tool with `id` from the history, failing if any other
+    /// tool still depends on it.
+    ///
+    /// Mirrors the original C++ app's undo/redo philosophy (see
+    /// `crate::undo`'s module docs): this mutates the ordered tool-record
+    /// list — our DOM-equivalent — and nothing else. It never touches
+    /// resolved geometry, and callers are expected to call `recompute_all`
+    /// again afterward to see the effect; this method has no dependency
+    /// on the recompute engine at all.
+    pub fn remove_tool(&mut self, id: ObjectId) -> Result<(ToolRecord, usize), DocumentError> {
+        for other in &self.history {
+            // scan every record for one that depends on `id`
+            if other.id == id {
+                // this is the record about to be removed itself, not some other tool: skip it
+                continue; // a tool never counts as depending on itself
+            }
+            if references_of(&other.kind).contains(&id) {
+                // some other tool still references `id`: removing it would leave that tool dangling
+                return Err(DocumentError::ToolInUse {
+                    id,
+                    used_by: other.id,
+                }); // report exactly which tool is blocking the removal, without mutating anything
+            }
+        }
+
+        let index = self
+            .history
+            .iter() // scan for the record's current position
+            .position(|record| record.id == id) // find where this id actually lives in history
+            .ok_or(DocumentError::ToolNotFound(id))?; // defensive: should be guaranteed present if history_ids.contains(id), but never index unsafely
+
+        let record = self.history.remove(index); // remove it; Vec::remove shifts later elements left, preserving their relative order
+        self.history_ids.remove(&id); // this id is no longer present in the document
+
+        // next_id is deliberately NOT rolled back here: ids are never
+        // reused once allocated, which is exactly what makes it safe to
+        // later redo an "add" of this same id without any collision risk
+        // — even though the id was just removed and the counter may keep
+        // climbing for unrelated adds in the meantime.
+        Ok((record, index)) // hand back both the removed record and its original position, for undo to restore it there later
+    }
+
+    /// Replaces the `ToolKind` stored under `id` with `new_kind`,
+    /// returning the previous `ToolKind`.
+    ///
+    /// Validates `new_kind`'s own references first, the same way
+    /// `add_end_line`/`add_line` validate before appending — a bad
+    /// replacement (referencing an id that doesn't exist in this
+    /// document) fails loudly here rather than silently installing a
+    /// dangling reference that only `recompute_all` would later catch.
+    pub fn replace_tool_kind(
+        &mut self,
+        id: ObjectId,
+        new_kind: ToolKind,
+    ) -> Result<ToolKind, DocumentError> {
+        for dependency in references_of(&new_kind) {
+            // check every id the replacement kind would depend on
+            if !self.contains(dependency) {
+                // this dependency doesn't exist anywhere in the document: refuse before touching anything
+                return Err(DocumentError::MissingDependency(dependency)); // precise, actionable error naming the bad reference
+            }
+        }
+
+        let record = self
+            .history
+            .iter_mut() // need a mutable reference to swap the kind in place
+            .find(|record| record.id == id) // locate the record being modified
+            .ok_or(DocumentError::ToolNotFound(id))?; // defensive: id must actually exist in this document
+
+        let old_kind = std::mem::replace(&mut record.kind, new_kind); // swap in the new kind, capturing the previous one in a single step
+        Ok(old_kind) // hand back the replaced-out kind, e.g. so undo can restore it later
+    }
+
+    /// Inserts `record` back into the history at `index`, failing if its
+    /// id is already present.
+    ///
+    /// The undo-side counterpart to `remove_tool`: restoring a removed
+    /// tool to its *exact original position* matters, not just re-adding
+    /// it somewhere — `recompute_all` processes history strictly in
+    /// order, so inserting it at a different position could change
+    /// dependency-resolution behavior for every tool between the old and
+    /// new positions, even if every individual reference still resolves.
+    pub fn insert_tool_record_at(
+        &mut self,
+        index: usize,
+        record: ToolRecord,
+    ) -> Result<(), DocumentError> {
+        if self.history_ids.contains(&record.id) {
+            // this id is already present: refuse rather than create a duplicate
+            return Err(DocumentError::DuplicateId(record.id)); // reject before mutating anything
+        }
+        self.history_ids.insert(record.id); // record this id as present again
+
+        if record.id.raw() >= self.next_id {
+            // Defensive guard, not expected to normally trigger:
+            // `remove_tool`'s "never roll back next_id" policy already
+            // guarantees ids removed from THIS document stay below
+            // next_id. Kept anyway so this method stays correct as a
+            // standalone primitive regardless of caller discipline (e.g.
+            // if it's ever used to insert a record sourced elsewhere).
+            self.next_id = record.id.raw() + 1; // keep the counter strictly ahead of every known id
+        }
+
+        self.history.insert(index, record); // insert at the exact original position; Vec::insert shifts later elements right, preserving strict document order
+        Ok(()) // restored successfully
     }
 
     /// Test-only escape hatch: pushes `record` directly onto the history,
@@ -579,5 +734,103 @@ mod tests {
                 cached_value: 36.25,
             })
         );
+    }
+
+    #[test]
+    fn remove_tool_on_an_unreferenced_id_succeeds() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 1.0, 1.0); // not referenced by anything
+
+        let (removed, _index) = doc.remove_tool(b).unwrap();
+        assert_eq!(removed.id, b);
+        assert!(!doc.contains(b));
+        assert!(doc.get_tool(b).is_none());
+        assert!(doc.contains(a)); // unrelated tool is untouched
+    }
+
+    #[test]
+    fn remove_tool_still_referenced_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let a1 = doc.add_end_line("A1", a, "0", "10").unwrap(); // depends on `a`
+
+        let len_before = doc.history().len();
+        let err = doc.remove_tool(a).unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, DocumentError::ToolInUse { id: a, used_by: a1 });
+        assert_eq!(len_before, len_after);
+        assert!(doc.contains(a)); // still present: the failed removal changed nothing
+    }
+
+    #[test]
+    fn replace_tool_kind_with_valid_kind_returns_the_previous_kind() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+
+        let new_kind = ToolKind::BasePoint {
+            name: "A".to_string(),
+            x: 9.0,
+            y: 9.0,
+        };
+        let old_kind = doc.replace_tool_kind(a, new_kind.clone()).unwrap();
+
+        assert_eq!(
+            old_kind,
+            ToolKind::BasePoint {
+                name: "A".to_string(),
+                x: 0.0,
+                y: 0.0,
+            }
+        );
+        assert_eq!(doc.get_tool(a).unwrap().kind, new_kind);
+    }
+
+    #[test]
+    fn replace_tool_kind_with_missing_dependency_fails_and_leaves_original_kind() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let bad_kind = ToolKind::EndLine {
+            name: "A1".to_string(),
+            base_point: bogus,
+            angle_formula: "0".to_string(),
+            length_formula: "10".to_string(),
+        };
+        let err = doc.replace_tool_kind(a, bad_kind).unwrap_err();
+        assert_eq!(err, DocumentError::MissingDependency(bogus));
+
+        // the record being "modified" is untouched: it still shows its original kind
+        assert_eq!(
+            doc.get_tool(a).unwrap().kind,
+            ToolKind::BasePoint {
+                name: "A".to_string(),
+                x: 0.0,
+                y: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn insert_tool_record_at_with_duplicate_id_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+
+        let len_before = doc.history().len();
+        let duplicate = ToolRecord {
+            id: a, // already present
+            kind: ToolKind::BasePoint {
+                name: "Duplicate".to_string(),
+                x: 5.0,
+                y: 5.0,
+            },
+        };
+        let err = doc.insert_tool_record_at(0, duplicate).unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, DocumentError::DuplicateId(a));
+        assert_eq!(len_before, len_after);
     }
 }

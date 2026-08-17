@@ -19,7 +19,7 @@ pub mod recompute;
 pub mod variable;
 
 pub use container::PatternData;
-pub use document::{Document, ToolKind, ToolRecord};
+pub use document::{Document, DocumentError, ToolKind, ToolRecord};
 pub use error::ContainerError;
 pub use geo::{GeoObject, LineData, PointData};
 pub use id::ObjectId;

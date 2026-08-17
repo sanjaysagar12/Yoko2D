@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pattern>
+  <version>0.1</version>
+  <unit>cm</unit>
+  <measurementsPath>sample.json</measurementsPath>
+  <history>
+    <point type="basePoint" id="1" name="A" x="0" y="0"/>
+    <point type="endLine" id="2" name="A1" basePoint="1" angle="0" length="height_scapula/10"/>
+    <line id="5" firstPoint="1" secondPoint="2"/>
+  </history>
+</pattern>

@@ -1,8 +1,25 @@
 use std::collections::HashMap; // backs `base_variables`, the same collection type `PatternData` uses for variables
 use std::collections::HashSet; // backs `history_ids`, an O(1) existence index parallel to `history`
 
+use thiserror::Error; // brings in the Error derive macro used by DocumentError below
+
 use crate::id::ObjectId; // the id type every tool record and geometric reference is built from
 use crate::variable::{Variable, VariableKind}; // the variable payload type, and its kind tag used to filter measurements out
+
+/// Everything that can go wrong constructing a [`Document`] from parts that
+/// didn't come from `Document`'s own `add_tool`/`add_*` methods (currently:
+/// only [`Document::from_parts`], used by `io`'s Phase 8 pattern-file
+/// deserialization).
+#[derive(Debug, Clone, PartialEq, Error)] // Debug/Clone/PartialEq mirror this crate's other error types; Error implements std::error::Error via thiserror
+pub enum DocumentError {
+    /// Two entries in the input history share an `id`. `add_tool` can
+    /// never produce this (its counter only ever climbs), so it can only
+    /// happen when reconstructing a `Document` from external data (e.g. a
+    /// corrupted or hand-edited pattern file) that wasn't validated by
+    /// `Document` itself as it was built.
+    #[error("duplicate object id {0:?} in restored history")]
+    DuplicateId(ObjectId), // the id that appeared more than once
+}
 
 /// One entry in a [`Document`]'s ordered tool history: the id it was
 /// assigned when added, plus what kind of tool it is.
@@ -238,11 +255,45 @@ impl Document {
     /// Iterates every `(name, Variable)` pair in the base variable table,
     /// in unspecified order (the same order `HashMap::iter` yields).
     ///
-    /// `pub(crate)`: only `recompute::recompute_all` needs this, to seed a
-    /// fresh `PatternData` with `Document`'s variables before walking the
-    /// tool history.
-    pub(crate) fn base_variables(&self) -> impl Iterator<Item = (&String, &Variable)> {
+    /// Public (widened from `pub(crate)` in Phase 8): originally only
+    /// `recompute::recompute_all` needed this, to seed a fresh
+    /// `PatternData` with `Document`'s variables before walking the tool
+    /// history; the `io` crate's pattern-file serialization now needs the
+    /// same read access from outside this crate.
+    pub fn base_variables(&self) -> impl Iterator<Item = (&String, &Variable)> {
         self.base_variables.iter() // hand back the map's own iterator; nothing to transform here
+    }
+
+    /// Rebuilds a `Document` from an already-assembled `history` and
+    /// `base_variables`, validating that no two records share an `id` and
+    /// restoring the id counter to continue past whatever was loaded.
+    ///
+    /// This is the deserialization-side counterpart to `add_tool`: where
+    /// `add_tool` can never produce a duplicate id (its counter only
+    /// climbs), a `history` built from external data (e.g. a hand-edited
+    /// or corrupted pattern file) has no such guarantee, so it's validated
+    /// here instead.
+    pub fn from_parts(
+        history: Vec<ToolRecord>, // the tool records to adopt, in order, exactly as given
+        base_variables: HashMap<String, Variable>, // the variable table to adopt as-is (pattern files don't embed variable values — see io's Phase 8 docs)
+    ) -> Result<Self, DocumentError> {
+        let mut history_ids = HashSet::new(); // tracks every id seen so far in `history`, to catch duplicates
+        let mut max_id = 0u32; // tracks the highest raw id value seen; start at 0 so an empty history still yields a valid next_id
+        for record in &history {
+            // walk the caller-supplied history in order, validating as we go
+            if history_ids.contains(&record.id) {
+                // this id already appeared earlier in the same history: a corrupted/hand-edited file
+                return Err(DocumentError::DuplicateId(record.id)); // reject rather than silently accept the collision
+            }
+            history_ids.insert(record.id); // record this id as seen, for the next iteration's duplicate check
+            max_id = max_id.max(record.id.raw()); // keep track of the running maximum raw id value across all records
+        }
+        Ok(Document {
+            history,             // adopt the caller-supplied history as-is, now proven duplicate-free
+            history_ids,         // the id-presence index built above, kept in sync with `history`
+            base_variables,      // adopt the caller-supplied variable table as-is
+            next_id: max_id + 1, // ensures a later add_tool on this restored Document never collides with any id loaded from the file
+        })
     }
 
     /// Test-only escape hatch: pushes `record` directly onto the history,

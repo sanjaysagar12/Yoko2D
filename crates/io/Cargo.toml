@@ -14,6 +14,7 @@ edition.workspace = true
 # Aliasing to `core_lib` here sidesteps the collision entirely.
 [dependencies]
 core_lib = { package = "core", path = "../core" }
+quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -99,6 +99,8 @@ fn references_of(kind: &ToolKind) -> Vec<ObjectId> {
             ..
         } => vec![*axis_p1, *axis_p2, *hypotenuse_p1, *hypotenuse_p2], // depends on both axis points plus both hypotenuse points
         ToolKind::PointOfContact { center, p1, p2, .. } => vec![*center, *p1, *p2], // depends on the circle-center point plus both segment endpoints
+        ToolKind::Arc { center, .. } => vec![*center], // depends on the circle's own center point
+        ToolKind::Spline { p1, p4, .. } => vec![*p1, *p4], // depends on both curve endpoints
     }
 }
 
@@ -312,6 +314,37 @@ pub enum ToolKind {
         p1: ObjectId,           // the segment's first endpoint
         p2: ObjectId,           // the segment's second endpoint
         radius_formula: String, // a formula string evaluating to the circle's radius
+    },
+
+    /// A circular arc: a center point plus radius/start-angle/end-angle
+    /// formulas — mirrors Seamly2D's `VToolArc::Create`/`VArc`. A first-class
+    /// curve `ToolKind`, unlike every construction tool above (which all
+    /// produce a single `Point`): this produces a `GeoObject::Arc`, sampled
+    /// into a polyline for rendering/export by `crate::geometry::
+    /// direction_from_angle_deg`'s callers in the `render`/`cli` crates.
+    Arc {
+        name: String,                // the arc's user-facing label
+        center: ObjectId,            // the circle's center
+        radius_formula: String, // a formula string evaluating to the circle's radius; must evaluate > 0.0
+        start_angle_formula: String, // a formula string evaluating to the sweep's starting angle, in degrees
+        end_angle_formula: String, // a formula string evaluating to the sweep's ending angle, in degrees
+    },
+
+    /// A single-segment cubic Bezier curve between two existing points,
+    /// mirrors Seamly2D's `VToolSpline::Create`/`VSpline`: each endpoint
+    /// gets its own independent tangent-angle formula (degrees) and
+    /// handle-length formula, from which the two interior Bezier control
+    /// points are derived (`crate::recompute`'s `ToolKind::Spline` arm).
+    /// Like `Arc` above, this produces a curve `GeoObject` (`Spline`), not a
+    /// `Point`.
+    Spline {
+        name: String,            // the curve's user-facing label
+        p1: ObjectId,            // the curve's first endpoint
+        p4: ObjectId,            // the curve's second endpoint
+        angle1_formula: String, // a formula string evaluating to p1's own tangent angle, in degrees
+        length1_formula: String, // a formula string evaluating to p1's own control-handle length
+        angle2_formula: String, // a formula string evaluating to p4's own tangent angle, in degrees
+        length2_formula: String, // a formula string evaluating to p4's own control-handle length
     },
 }
 
@@ -857,6 +890,73 @@ impl Document {
             p1,                // already validated above
             p2,                // already validated above
             radius_formula: radius_formula.into(), // convert the caller's radius formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a circular arc centered at `center`, with `radius_formula`/
+    /// `start_angle_formula`/`end_angle_formula` controlling its shape on
+    /// recompute.
+    ///
+    /// Same "validate immediately, only register on success" contract as
+    /// every other `add_*` constructor: `center` is checked against this
+    /// Document's known ids *before* anything is appended to `history`.
+    pub fn add_arc(
+        &mut self,
+        name: impl Into<String>,
+        center: ObjectId,
+        radius_formula: impl Into<String>,
+        start_angle_formula: impl Into<String>,
+        end_angle_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(center) {
+            // `center` isn't a real id from this Document: refuse before touching history
+            return Err(crate::PatternError::MissingDependency(center)); // precise, actionable error naming the bad reference
+        }
+        let kind = ToolKind::Arc {
+            name: name.into(), // convert the caller's name into an owned String
+            center,            // already validated above
+            radius_formula: radius_formula.into(), // convert the caller's radius formula into an owned String
+            start_angle_formula: start_angle_formula.into(), // convert the caller's start-angle formula into an owned String
+            end_angle_formula: end_angle_formula.into(), // convert the caller's end-angle formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a single-segment cubic Bezier curve between `p1` and `p4`, with
+    /// each endpoint's own tangent-angle/handle-length formulas controlling
+    /// the two interior control points on recompute.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `p1` then `p4` in order (both via `self.contains(..)`
+    /// before calling `add_tool`, matching this method's own doc comment).
+    #[allow(clippy::too_many_arguments)] // mirrors VSpline's own constructor shape (two independent angle+length pairs, one per endpoint); splitting this into a builder would be more invasive than the flat parameter list every other add_* constructor in this file already uses
+    pub fn add_spline(
+        &mut self,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p4: ObjectId,
+        angle1_formula: impl Into<String>,
+        length1_formula: impl Into<String>,
+        angle2_formula: impl Into<String>,
+        length2_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first, so a p1 failure is reported as p1's fault, not silently shadowed by a p4 check
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p4) {
+            // p1 was fine; now check p4 on its own
+            return Err(crate::PatternError::MissingDependency(p4)); // precise, actionable error naming p4
+        }
+        let kind = ToolKind::Spline {
+            name: name.into(), // convert the caller's name into an owned String
+            p1,                // already validated above
+            p4,                // already validated above
+            angle1_formula: angle1_formula.into(), // convert the caller's angle1 formula into an owned String
+            length1_formula: length1_formula.into(), // convert the caller's length1 formula into an owned String
+            angle2_formula: angle2_formula.into(), // convert the caller's angle2 formula into an owned String
+            length2_formula: length2_formula.into(), // convert the caller's length2 formula into an owned String
         };
         Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
     }
@@ -1668,5 +1768,86 @@ mod tests {
             }
         );
         assert!(doc.contains(center)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn add_arc_with_unknown_center_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc.add_arc("A", bogus, "10", "0", "90").unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_arc_with_valid_center_succeeds() {
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 0.0, 0.0);
+        let result = doc.add_arc("A", center, "10", "0", "90");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn add_spline_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc
+            .add_spline("S", a, bogus, "90", "3", "90", "3")
+            .unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    #[test]
+    fn add_spline_with_valid_points_succeeds() {
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p4 = doc.add_base_point("P4", 10.0, 0.0);
+        let result = doc.add_spline("S", p1, p4, "90", "3", "90", "3");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn remove_tool_blocked_by_an_arcs_dependency() {
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 0.0, 0.0);
+        let result = doc.add_arc("A", center, "10", "0", "90").unwrap();
+
+        let err = doc.remove_tool(center).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: center,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(center)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn remove_tool_blocked_by_a_splines_dependency() {
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p4 = doc.add_base_point("P4", 10.0, 0.0);
+        let result = doc.add_spline("S", p1, p4, "90", "3", "90", "3").unwrap();
+
+        let err = doc.remove_tool(p1).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: p1,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(p1)); // the failed removal changed nothing
     }
 }

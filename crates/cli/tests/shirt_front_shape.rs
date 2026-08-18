@@ -1,11 +1,21 @@
 // Permanent regression test for the shirt-front worked example
 // (fixtures/actions/shirt_front.json): runs the real built binary against
 // it and checks the resulting geometry both structurally (a simple, closed
-// perimeter) and against the specific concave-neck/convex-armhole shape
-// this fixture is meant to approximate with straight-line segments (this
-// engine has no curve/Arc/Spline tool — see fixtures/actions/shirt_front.json's
-// own header comment and fixtures/README.md for that documented
-// simplification).
+// perimeter) and against the specific concave-neck/convex-armhole shape.
+//
+// The neck and armhole curves are now each a single, first-class
+// core_lib::ToolKind::Spline (a real cubic Bezier GeoObject), not an
+// implicit shape approximated by a long chain of point-of-intersection/
+// midpoint calls. Each Spline's angle/length formulas were chosen (see
+// shirt_front.json's own comments-adjacent construction) to exactly
+// reproduce, via quadratic-to-cubic Bezier degree elevation, the shape the
+// old de Casteljau midpoint chain used to trace by hand — so a point
+// sampled at the curve's own t=0.5 (still built here via a short 3-step
+// Midpoint chain around the same corner-of-the-bounding-rectangle control
+// point the old construction used) lies EXACTLY on the new Spline, not just
+// approximately near it. The piece boundary references that single sampled
+// point per curve, so it still closely traces the true curve rather than
+// bypassing it with one straight edge.
 
 use assert_cmd::Command;
 
@@ -98,80 +108,76 @@ fn signed_side(chord_start: (f64, f64), chord_end: (f64, f64), point: (f64, f64)
 
 /// A minimum magnitude a "concave"/"convex" signed distance must clear to
 /// count as a REAL deviation from the chord, not floating-point noise. The
-/// neck/armhole curves are built as a quadratic Bezier (tangent to the
-/// shoulder line and to the center-front/side-seam lines at their own
-/// endpoints — a quarter-ellipse-style construction), evaluated at exact
-/// points via de Casteljau's algorithm (see fixtures/actions/shirt_front.json),
-/// so there's no single "intentional offset" constant to compare this
-/// against, but every evaluated point still lies strictly inside the same
-/// control triangle (and therefore strictly off the chord) unless the
-/// control point is itself degenerate, so a small fixed epsilon remains
-/// the right guard against that near-zero case.
+/// neck/armhole curves are each a `core_lib::ToolKind::Spline` (a real
+/// cubic Bezier), constructed via exact quadratic-to-cubic degree elevation
+/// from the same control point (`A10`/`A20`) the fixture's old de Casteljau
+/// construction used — so the single sampled point checked below (the
+/// curve's own exact t=0.5 point, via a short Midpoint chain around that
+/// same control point) always lies strictly inside the control triangle
+/// (and therefore strictly off the chord) unless the control point is
+/// itself degenerate, so a small fixed epsilon remains the right guard
+/// against that near-zero case.
 const MIN_DEVIATION: f64 = 1e-6;
 
 #[test]
-fn neck_curve_intermediate_points_are_strictly_concave() {
+fn neck_curve_intermediate_point_is_strictly_concave() {
     let (document, data) = run_shirt_front_fixture();
     let chord_start = point(&document, &data, "A5"); // the neck-width/shoulder-line point
     let chord_end = point(&document, &data, "A2"); // the front-neck-depth center-front point
-                                                   // Perimeter order from A5 to A2 is A5, A16, A13, A19, A2 (see
-                                                   // fixtures/actions/shirt_front.json): all three intermediate
-                                                   // points — each an EXACT point on the quadratic Bezier through
-                                                   // A5, control point A10, A2 (t=0.25, 0.5, 0.75 respectively),
-                                                   // via true de Casteljau evaluation (nested Midpoint calls).
-    for name in ["A16", "A13", "A19"] {
-        let p = point(&document, &data, name);
-        // Hand-derived sign (see fixtures/actions/shirt_front.json's own
-        // construction and this repo's Phase 3 iteration log): with
-        // chord_start = A5 and chord_end = A2, a point on the concave
-        // (center-front, "cutting more fabric away") side of the chord
-        // has a STRICTLY POSITIVE signed_side value.
-        let side = signed_side(chord_start, chord_end, p);
-        assert!(
-            side > MIN_DEVIATION,
-            "neck curve point {name} is not strictly concave: signed_side={side} for point {p:?} \
-             relative to chord {chord_start:?} -> {chord_end:?} (expected a value > {MIN_DEVIATION})"
-        );
-    }
+                                                   // Perimeter order from A5 to A2 is A5, A13, A2 (see
+                                                   // fixtures/actions/shirt_front.json): A13 is the EXACT t=0.5
+                                                   // point on the NeckCurve spline through A5, control point A10,
+                                                   // A2 — the same curve `add_spline`'s own angle1/length1/angle2/
+                                                   // length2 formulas resolve to via degree elevation.
+    let p = point(&document, &data, "A13");
+    // Hand-derived sign (see fixtures/actions/shirt_front.json's own
+    // construction and this repo's Phase 3 iteration log): with
+    // chord_start = A5 and chord_end = A2, a point on the concave
+    // (center-front, "cutting more fabric away") side of the chord
+    // has a STRICTLY POSITIVE signed_side value.
+    let side = signed_side(chord_start, chord_end, p);
+    assert!(
+        side > MIN_DEVIATION,
+        "neck curve point A13 is not strictly concave: signed_side={side} for point {p:?} \
+         relative to chord {chord_start:?} -> {chord_end:?} (expected a value > {MIN_DEVIATION})"
+    );
 }
 
 #[test]
-fn armhole_curve_intermediate_points_are_strictly_convex() {
+fn armhole_curve_intermediate_point_is_strictly_concave() {
     let (document, data) = run_shirt_front_fixture();
     let chord_start = point(&document, &data, "A7"); // the shoulder point
     let chord_end = point(&document, &data, "A8"); // the underarm/side-seam point
-                                                   // Perimeter order from A7 to A8 (via the armhole curve, in the
-                                                   // REVERSE traversal direction the perimeter itself uses, A8 ->
-                                                   // A29 -> A23 -> A26 -> A7) is checked here from A7's own side:
-                                                   // all three intermediate points — exact quadratic-Bezier points
-                                                   // through A7, control point A20, A8 (t=0.25/0.5/0.75), same
-                                                   // de Casteljau technique as the neck curve above.
-    for name in ["A26", "A23", "A29"] {
-        let p = point(&document, &data, name);
-        // Hand-derived sign, same technique as the neck check above, but
-        // — as the task's own inverted-check instructions describe —
-        // this is checked against the OPPOSITE (convex, bulging away from
-        // center front) side. With chord_start = A7 and chord_end = A8,
-        // that convex side also comes out STRICTLY POSITIVE for this
-        // particular chord's own orientation (down-and-right, rather than
-        // the neck chord's down-and-left) — a coincidence of this
-        // fixture's own geometry, not a general rule; see the construction
-        // log for the actual hand derivation.
-        let side = signed_side(chord_start, chord_end, p);
-        assert!(
-            side > MIN_DEVIATION,
-            "armhole curve point {name} is not strictly convex: signed_side={side} for point {p:?} \
-             relative to chord {chord_start:?} -> {chord_end:?} (expected a value > {MIN_DEVIATION})"
-        );
-    }
+                                                   // Perimeter order from A8 to A7 (via the armhole curve) is A8,
+                                                   // A23, A7 (see fixtures/actions/shirt_front.json): A23 is the
+                                                   // EXACT t=0.5 point on the ArmholeCurve spline through A7,
+                                                   // control point A20, A8, checked here from A7's own side, same
+                                                   // degree-elevation technique as the neck curve above. A20 is
+                                                   // the MIRROR of this fixture's earlier (A8.x, A7.y) corner —
+                                                   // it's (A7.x, A8.y) instead — so the curve hugs the body/piece
+                                                   // interior (a proper concave armhole scoop for the sleeve to
+                                                   // set into) rather than bulging outward into the sleeve's own
+                                                   // space, which the earlier, un-mirrored construction did.
+    let p = point(&document, &data, "A23");
+    // Hand-derived sign: with chord_start = A7 and chord_end = A8 (a
+    // down-and-right chord), the concave (body-interior) side comes out
+    // STRICTLY NEGATIVE for this particular chord's own orientation —
+    // the opposite sign from the neck curve's own chord above, since
+    // that chord runs down-and-left instead; a property of each chord's
+    // own orientation, not a general rule.
+    let side = signed_side(chord_start, chord_end, p);
+    assert!(
+        side < -MIN_DEVIATION,
+        "armhole curve point A23 is not strictly concave: signed_side={side} for point {p:?} \
+         relative to chord {chord_start:?} -> {chord_end:?} (expected a value < {})",
+        -MIN_DEVIATION
+    );
 }
 
 #[test]
 fn perimeter_is_a_simple_non_self_intersecting_closed_polygon() {
     let (document, data) = run_shirt_front_fixture();
-    let perimeter_names = [
-        "A5", "A16", "A13", "A19", "A2", "A4", "A9", "A8", "A29", "A23", "A26", "A7",
-    ]; // the exact perimeter order fixtures/actions/shirt_front.json's own add_piece action lists
+    let perimeter_names = ["A5", "A13", "A2", "A4", "A9", "A8", "A23", "A7"]; // the exact perimeter order fixtures/actions/shirt_front.json's own add_piece action lists
     let perimeter: Vec<(f64, f64)> = perimeter_names
         .iter()
         .map(|name| point(&document, &data, name))
@@ -218,9 +224,7 @@ fn segments_intersect(p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), p4: (f64, 
 #[test]
 fn overall_proportions_are_within_twenty_percent_of_half_chest_and_body_length() {
     let (document, data) = run_shirt_front_fixture();
-    let perimeter_names = [
-        "A5", "A16", "A13", "A19", "A2", "A4", "A9", "A8", "A29", "A23", "A26", "A7",
-    ];
+    let perimeter_names = ["A5", "A13", "A2", "A4", "A9", "A8", "A23", "A7"];
     let perimeter: Vec<(f64, f64)> = perimeter_names
         .iter()
         .map(|name| point(&document, &data, name))

@@ -33,7 +33,21 @@ pub enum DrawCommand {
         // the hint through from the source geometry.
         filled: bool,
     },
+    /// An OPEN (not closed/wrap-around) sequence of connected line
+    /// segments — used for `Arc`/`Spline` curves, tessellated into a
+    /// straight-line approximation for backends with no native curve
+    /// primitive of their own.
+    Polyline {
+        points: Vec<(f64, f64)>, // the sampled curve points, in order, in pattern-space coordinates
+    },
 }
+
+/// How many straight-line segments an `Arc`/`Spline` curve is sampled into
+/// for `Polyline` tessellation. A named constant, not a magic number
+/// repeated at each call site below: both curve kinds share the same
+/// sampling density, since neither benefits from a finer or coarser count
+/// than the other at this crate's typical pattern scale.
+const CURVE_SAMPLE_SEGMENTS: usize = 32;
 
 /// Everything that can go wrong turning a [`core_lib::PatternData`] into
 /// draw commands.
@@ -106,6 +120,29 @@ pub fn render(data: &core_lib::PatternData) -> Result<Vec<DrawCommand>, RenderEr
                         filled: false,
                     });
                 }
+            }
+            core_lib::GeoObject::Arc(arc) => {
+                let mut points = Vec::with_capacity(CURVE_SAMPLE_SEGMENTS + 1); // one sample per segment boundary, including both ends
+                for i in 0..=CURVE_SAMPLE_SEGMENTS {
+                    let t = i as f64 / CURVE_SAMPLE_SEGMENTS as f64; // 0.0..=1.0, evenly spaced across the sweep
+                    let theta_deg =
+                        arc.start_angle_deg + t * (arc.end_angle_deg - arc.start_angle_deg); // linearly interpolate the angle across the sweep
+                    let theta_rad = theta_deg.to_radians(); // degrees -> radians before cos/sin, same convention as core_lib::geo::ArcData's own doc comment
+                    let x = arc.center.0 + arc.radius * theta_rad.cos(); // center + radius*cos(theta)
+                    let y = arc.center.1 + arc.radius * theta_rad.sin(); // center + radius*sin(theta)
+                    points.push((x, y));
+                }
+                commands.push(DrawCommand::Polyline { points });
+            }
+            core_lib::GeoObject::Spline(spline) => {
+                let mut points = Vec::with_capacity(CURVE_SAMPLE_SEGMENTS + 1); // one sample per segment boundary, including both ends
+                for i in 0..=CURVE_SAMPLE_SEGMENTS {
+                    let t = i as f64 / CURVE_SAMPLE_SEGMENTS as f64; // 0.0..=1.0, evenly spaced along the curve
+                    points.push(core_lib::geometry::cubic_bezier_point(
+                        spline.p1, spline.p2, spline.p3, spline.p4, t,
+                    )); // reuses core_lib's own Bezier formula rather than reimplementing it here
+                }
+                commands.push(DrawCommand::Polyline { points });
             }
         }
     }
@@ -238,6 +275,58 @@ mod tests {
                 filled: false,
             }
         );
+    }
+
+    #[test]
+    fn render_of_a_spline_produces_a_polyline_whose_ends_match_p1_and_p4() {
+        let mut data = PatternData::default();
+        data.add_object(GeoObject::Spline(core_lib::SplineData {
+            p1: (0.0, 0.0),
+            p2: (0.0, 3.0),
+            p3: (10.0, 3.0),
+            p4: (10.0, 0.0),
+        }));
+
+        let commands = render(&data).unwrap();
+        assert_eq!(commands.len(), 1);
+        let DrawCommand::Polyline { points } = &commands[0] else {
+            panic!("expected a single Polyline command, got {:?}", commands[0]);
+        };
+        // A meaningful number of intermediate samples were actually produced,
+        // not just the two endpoints.
+        assert!(points.len() > 2);
+        let first = points.first().unwrap();
+        let last = points.last().unwrap();
+        assert!((first.0 - 0.0).abs() < 1e-9);
+        assert!((first.1 - 0.0).abs() < 1e-9);
+        assert!((last.0 - 10.0).abs() < 1e-9);
+        assert!((last.1 - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn render_of_an_arc_produces_a_polyline_sampled_across_the_sweep() {
+        let mut data = PatternData::default();
+        data.add_object(GeoObject::Arc(core_lib::ArcData {
+            center: (5.0, 3.0),
+            radius: 10.0,
+            start_angle_deg: 0.0,
+            end_angle_deg: 90.0,
+        }));
+
+        let commands = render(&data).unwrap();
+        assert_eq!(commands.len(), 1);
+        let DrawCommand::Polyline { points } = &commands[0] else {
+            panic!("expected a single Polyline command, got {:?}", commands[0]);
+        };
+        assert!(points.len() > 2);
+        let first = points.first().unwrap();
+        let last = points.last().unwrap();
+        // theta=0: center + radius*(cos(0),sin(0)) = (15,3).
+        assert!((first.0 - 15.0).abs() < 1e-9);
+        assert!((first.1 - 3.0).abs() < 1e-9);
+        // theta=90: center + radius*(cos(90),sin(90)) = (5,13).
+        assert!((last.0 - 5.0).abs() < 1e-9);
+        assert!((last.1 - 13.0).abs() < 1e-9);
     }
 
     #[test]

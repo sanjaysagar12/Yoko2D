@@ -143,6 +143,48 @@ pub(crate) fn line_circle_intersection(
     }
 }
 
+/// Converts an angle in degrees into a unit direction vector `(cos, sin)`.
+///
+/// Shared by every tool that places a point at a literal angle-and-length
+/// from a reference point (`EndLine`'s own arm in `recompute.rs`, plus
+/// Part A/B's new `Arc`/`Spline` arms): Seamly2D builds the equivalent
+/// point via `QLineF::setAngle`/`setLength`, and this crate's own
+/// `end_line_parity_matches_qlinef_setangle_convention_no_sign_flip` test
+/// already proved that convention needs no extra sign flip once converted
+/// into this crate's plain y-up `(x, y)` coordinates — so every tool using
+/// an angle+length construction can share this one function instead of
+/// re-deriving (and risking silently diverging) the same trig call.
+pub(crate) fn direction_from_angle_deg(angle_deg: f64) -> (f64, f64) {
+    let angle_rad = angle_deg.to_radians(); // degrees -> radians, this crate's one trig convention throughout
+    (angle_rad.cos(), angle_rad.sin()) // the unit direction (cos, sin) at this angle, in y-up coordinates
+}
+
+/// Evaluates a cubic Bezier curve through control points `p1`, `p2`, `p3`,
+/// `p4` at parameter `t` (expected in `[0.0, 1.0]`), via the standard
+/// Bernstein-basis formula
+/// `B(t) = (1-t)^3*p1 + 3*(1-t)^2*t*p2 + 3*(1-t)*t^2*p3 + t^3*p4`.
+///
+/// `pub`, not `pub(crate)`: shared across crates by Part B's own parity
+/// test (this crate) AND Part C's rendering/image-export tessellation (the
+/// `render`/`cli` crates), so this formula is written exactly once in the
+/// whole workspace rather than being reimplemented at each call site.
+pub fn cubic_bezier_point(
+    p1: (f64, f64), // the curve's first endpoint (t=0.0)
+    p2: (f64, f64), // the first interior control point
+    p3: (f64, f64), // the second interior control point
+    p4: (f64, f64), // the curve's second endpoint (t=1.0)
+    t: f64,         // the curve parameter to evaluate at, expected in [0.0, 1.0]
+) -> (f64, f64) {
+    let mt = 1.0 - t; // (1-t), reused across every Bernstein term below
+    let mt2 = mt * mt; // (1-t)^2
+    let mt3 = mt2 * mt; // (1-t)^3
+    let t2 = t * t; // t^2
+    let t3 = t2 * t; // t^3
+    let x = mt3 * p1.0 + 3.0 * mt2 * t * p2.0 + 3.0 * mt * t2 * p3.0 + t3 * p4.0; // B(t)'s x component
+    let y = mt3 * p1.1 + 3.0 * mt2 * t * p2.1 + 3.0 * mt * t2 * p3.1 + t3 * p4.1; // B(t)'s y component
+    (x, y) // the curve's resolved point at this parameter
+}
+
 /// Computes a simplified miter-join outward offset of a closed, straight-
 /// edged polygon contour by `width`.
 ///

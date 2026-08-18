@@ -23,7 +23,7 @@ pub mod variable;
 pub use container::PatternData;
 pub use document::{Document, DocumentError, PieceNode, ToolKind, ToolRecord};
 pub use error::ContainerError;
-pub use geo::{GeoObject, LineData, PieceData, PointData};
+pub use geo::{ArcData, GeoObject, LineData, PieceData, PointData, SplineData};
 pub use geometry::offset_polygon;
 pub use id::ObjectId;
 pub use recompute::{recompute_all, PatternError};

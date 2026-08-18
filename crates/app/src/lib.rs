@@ -128,6 +128,32 @@ impl eframe::App for Yoko2DApp {
                                     ),
                                 );
                             }
+                            render::DrawCommand::Polyline { points } => {
+                                // Curve tessellation (Arc/Spline sampled into straight
+                                // segments): drawn as a connected OPEN chain, with no
+                                // wrap-around edge back to the first vertex — the
+                                // Polygon arm just below is the one that closes the loop.
+                                let screen_points: Vec<egui::Pos2> = points
+                                    .iter()
+                                    .map(|(x, y)| {
+                                        let (screen_x, screen_y) = self.camera.to_screen(*x, *y); // pattern space -> screen pixels, per sample
+                                        egui::pos2(screen_x, screen_y)
+                                    })
+                                    .collect();
+                                for pair in screen_points.windows(2) {
+                                    // draw every consecutive sample pair as one segment; windows(2) naturally skips the (absent) wrap-around edge
+                                    painter.line_segment(
+                                        [pair[0], pair[1]],
+                                        // A distinct green from both the amber points and the
+                                        // light-blue piece outlines, so curve tessellation reads
+                                        // as its own visual category at a glance.
+                                        egui::Stroke::new(
+                                            1.5_f32,
+                                            egui::Color32::from_rgb(120, 220, 140),
+                                        ),
+                                    );
+                                }
+                            }
                             render::DrawCommand::Polygon { points, .. } => {
                                 // `filled` is ignored here: this phase always draws an outline only,
                                 // matching Part F's own doc comment that this crate makes no styling decisions.

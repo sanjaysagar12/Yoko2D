@@ -176,6 +176,28 @@ pub enum Action {
         radius_formula: String, // -> add_point_of_contact's `radius_formula` parameter
     },
 
+    /// Maps to `Document::add_arc(name, center, radius_formula, start_angle_formula, end_angle_formula)`.
+    #[serde(rename = "add_arc")]
+    AddArc {
+        name: String,                // -> add_arc's `name` parameter
+        center: String, // the NAME of an earlier point; resolved to add_arc's `center` parameter
+        radius_formula: String, // -> add_arc's `radius_formula` parameter
+        start_angle_formula: String, // -> add_arc's `start_angle_formula` parameter
+        end_angle_formula: String, // -> add_arc's `end_angle_formula` parameter
+    },
+
+    /// Maps to `Document::add_spline(name, p1, p4, angle1_formula, length1_formula, angle2_formula, length2_formula)`.
+    #[serde(rename = "add_spline")]
+    AddSpline {
+        name: String,            // -> add_spline's `name` parameter
+        p1: String, // the NAME of an earlier point; resolved to add_spline's `p1` parameter
+        p4: String, // the NAME of an earlier point; resolved to add_spline's `p4` parameter
+        angle1_formula: String, // -> add_spline's `angle1_formula` parameter
+        length1_formula: String, // -> add_spline's `length1_formula` parameter
+        angle2_formula: String, // -> add_spline's `angle2_formula` parameter
+        length2_formula: String, // -> add_spline's `length2_formula` parameter
+    },
+
     /// Maps to `Document::add_piece(name, nodes, seam_allowance_formula)`.
     /// `points` is an ordered list of earlier points' NAMES (not raw
     /// `PieceNode`s): each name is resolved to a `PieceNode` with
@@ -319,6 +341,8 @@ pub(crate) fn tool_name(kind: &core_lib::ToolKind) -> Option<&str> {
         core_lib::ToolKind::PointOfIntersection { name, .. } => Some(name.as_str()),
         core_lib::ToolKind::Triangle { name, .. } => Some(name.as_str()),
         core_lib::ToolKind::PointOfContact { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Arc { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Spline { name, .. } => Some(name.as_str()),
         core_lib::ToolKind::Line { .. } => None, // the only variant with no user-facing name
     }
 }
@@ -344,6 +368,8 @@ pub(crate) fn tool_kind_variant_name(kind: &core_lib::ToolKind) -> &'static str 
         core_lib::ToolKind::PointOfIntersection { .. } => "PointOfIntersection",
         core_lib::ToolKind::Triangle { .. } => "Triangle",
         core_lib::ToolKind::PointOfContact { .. } => "PointOfContact",
+        core_lib::ToolKind::Arc { .. } => "Arc",
+        core_lib::ToolKind::Spline { .. } => "Spline",
     }
 }
 
@@ -708,6 +734,47 @@ pub fn execute_action_script(
                 )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
                 names.insert(name.clone(), id); // record this name so later actions can reference it
             }
+            Action::AddArc {
+                name,
+                center,
+                radius_formula,
+                start_angle_formula,
+                end_angle_formula,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let center_id = resolve_name(&names, center)?; // look up the referenced point's id, or report exactly which name is missing
+                let id = document.add_arc(
+                    name.clone(),
+                    center_id,
+                    radius_formula.clone(),
+                    start_angle_formula.clone(),
+                    end_angle_formula.clone(),
+                )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
+            Action::AddSpline {
+                name,
+                p1,
+                p4,
+                angle1_formula,
+                length1_formula,
+                angle2_formula,
+                length2_formula,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let p1_id = resolve_name(&names, p1)?; // look up the referenced point's id, or report exactly which name is missing
+                let p4_id = resolve_name(&names, p4)?; // same, for the curve's second endpoint
+                let id = document.add_spline(
+                    name.clone(),
+                    p1_id,
+                    p4_id,
+                    angle1_formula.clone(),
+                    length1_formula.clone(),
+                    angle2_formula.clone(),
+                    length2_formula.clone(),
+                )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
             Action::AddPiece {
                 name,
                 points,
@@ -818,6 +885,92 @@ mod tests {
 
         let err = execute_action_script(&script).unwrap_err();
         assert!(matches!(err, ActionScriptError::DuplicateName(name) if name == "A"));
+    }
+
+    #[test]
+    fn execute_action_script_builds_an_arc_between_two_points() {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "Center".to_string(),
+                    x: 5.0,
+                    y: 3.0,
+                },
+                Action::AddArc {
+                    name: "A".to_string(),
+                    center: "Center".to_string(),
+                    radius_formula: "10".to_string(),
+                    start_angle_formula: "0".to_string(),
+                    end_angle_formula: "90".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let arc_id = document
+            .history()
+            .iter()
+            .find(|r| matches!(&r.kind, core_lib::ToolKind::Arc { name, .. } if name == "A"))
+            .unwrap()
+            .id;
+        let arc = data.get_arc(arc_id).unwrap();
+        // Hand-calculated: center=(5,3), radius=10, start=0, end=90.
+        assert!((arc.center.0 - 5.0).abs() < 1e-9);
+        assert!((arc.center.1 - 3.0).abs() < 1e-9);
+        assert!((arc.radius - 10.0).abs() < 1e-9);
+        assert!((arc.start_angle_deg - 0.0).abs() < 1e-9);
+        assert!((arc.end_angle_deg - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn execute_action_script_builds_a_spline_between_two_points() {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "P1".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "P4".to_string(),
+                    x: 10.0,
+                    y: 0.0,
+                },
+                Action::AddSpline {
+                    name: "S".to_string(),
+                    p1: "P1".to_string(),
+                    p4: "P4".to_string(),
+                    angle1_formula: "90".to_string(),
+                    length1_formula: "3".to_string(),
+                    angle2_formula: "90".to_string(),
+                    length2_formula: "3".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let spline_id = document
+            .history()
+            .iter()
+            .find(|r| matches!(&r.kind, core_lib::ToolKind::Spline { name, .. } if name == "S"))
+            .unwrap()
+            .id;
+        let spline = data.get_spline(spline_id).unwrap();
+        // Hand-calculated: P2 = (0,0)+3*(cos90,sin90) = (0,3); P3 = (10,0)+3*(cos90,sin90) = (10,3).
+        assert!((spline.p1.0 - 0.0).abs() < 1e-9);
+        assert!((spline.p1.1 - 0.0).abs() < 1e-9);
+        assert!((spline.p2.0 - 0.0).abs() < 1e-9);
+        assert!((spline.p2.1 - 3.0).abs() < 1e-9);
+        assert!((spline.p3.0 - 10.0).abs() < 1e-9);
+        assert!((spline.p3.1 - 3.0).abs() < 1e-9);
+        assert!((spline.p4.0 - 10.0).abs() < 1e-9);
+        assert!((spline.p4.1 - 0.0).abs() < 1e-9);
     }
 
     #[test]

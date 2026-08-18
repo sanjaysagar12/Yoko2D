@@ -342,6 +342,29 @@ fn describe_tool(kind: &core_lib::ToolKind) -> String {
             p1.raw(),     // the segment's first endpoint
             p2.raw()      // the segment's second endpoint
         ),
+        core_lib::ToolKind::Arc {
+            center,
+            radius_formula,
+            start_angle_formula,
+            end_angle_formula,
+            ..
+        } => format!(
+            "center={}, radius={radius_formula:?}, start_angle={start_angle_formula:?}, end_angle={end_angle_formula:?}",
+            center.raw() // the circle's center
+        ),
+        core_lib::ToolKind::Spline {
+            p1,
+            p4,
+            angle1_formula,
+            length1_formula,
+            angle2_formula,
+            length2_formula,
+            ..
+        } => format!(
+            "p1={}, p4={}, angle1={angle1_formula:?}, length1={length1_formula:?}, angle2={angle2_formula:?}, length2={length2_formula:?}",
+            p1.raw(), // the curve's first endpoint
+            p4.raw()  // the curve's second endpoint
+        ),
     }
 }
 

@@ -80,6 +80,14 @@ pub fn build_output(
                 // from an unrelated pattern file) is a normal, valid object
                 // this snapshot format just doesn't represent yet.
             }
+            core_lib::GeoObject::Arc(_) | core_lib::GeoObject::Spline(_) => {
+                // Same rationale as the Piece arm just above: this simple
+                // points+lines snapshot format predates curve tools and
+                // doesn't represent curve geometry yet — skipped rather than
+                // erroring, since an Arc/Spline present in `data` is a
+                // perfectly normal, valid object this format just doesn't
+                // carry through today.
+            }
         }
     }
 

@@ -34,11 +34,11 @@ Status legend:
 | `Normal` | `tools/drawTools/toolpoint/toolsinglepoint/toollinepoint/vtoolnormal.cpp` | `ToolKind::Normal` | Implemented-Correct | Part B #2. `QLineF::normalVector()`'s 90-degree rotation, converted through Qt's y-down-vs-Yoko2D's-y-up coordinate difference, lands on the SAME counter-clockwise rotation Yoko2D's own code already used — no sign bug found. Verified with an asymmetric case ((0,0)->(10,0), angle=0, length=5) that would visibly mirror to (0,-5) if the sign were wrong; it correctly resolves to (0,5). |
 | `Bisector` | `tools/drawTools/toolpoint/toolsinglepoint/toollinepoint/vtoolbisector.cpp` | `ToolKind::Bisector` | Implemented-Correct | Part B #3. Verified across a ~90, ~20, and ~160 degree case via an independent definitional check (equal angle-to-each-ray via the dot-product formula), not by re-deriving Seamly2D's own `QLineF::angleTo` formula — the vector-sum approach and Seamly2D's own selected bisector agree in every case tested. |
 | `LineIntersect` | `tools/drawTools/toolpoint/toolsinglepoint/vtoollineintersect.cpp` | `ToolKind::LineIntersect` | Implemented-Correct | **New in this task (Part C).** Plain infinite-line intersection; reuses `geometry::line_intersection` (now `pub(crate)`), the same helper `offset_polygon`'s own miter-join math already used. |
-| `Spline` | `tools/drawTools/toolcurve/vtoolspline.cpp` | `MISSING` | Missing | Curve tool; needs a new `GeoObject`/`ToolKind` curve representation, out of scope for this task. |
-| `CubicBezier` | `tools/drawTools/toolcurve/vtoolcubicbezier.cpp` | `MISSING` | Missing | Curve tool, same scope note as `Spline`. |
-| `CutSpline` | `tools/drawTools/toolpoint/toolsinglepoint/toolcut/vtoolcutspline.cpp` | `MISSING` | Missing | Depends on `Spline` existing first. |
-| `CutArc` | `tools/drawTools/toolpoint/toolsinglepoint/toolcut/vtoolcutarc.cpp` | `MISSING` | Missing | Depends on `Arc` existing first. |
-| `Arc` | `tools/drawTools/toolcurve/vtoolarc.cpp` | `MISSING` | Missing | Curve tool, same scope note as `Spline`. |
+| `Spline` | `tools/drawTools/toolcurve/vtoolspline.cpp`, `src/libs/vgeometry/vspline.cpp` | `ToolKind::Spline` | Implemented-Correct | **New in this task.** Verified against `VToolSpline::Create`/`VSpline::GetP2()`/`VSpline::GetP3()`, read directly from a fresh Seamly2D clone: both control points are built via `QLineF(p, p+(length,0)).setAngle(angle)` — the SAME `QLineF::setAngle` convention already verified sign-correct (no extra flip needed in this crate's y-up coordinates) by the `EndLine`/`Normal` parity tests, now factored into a single shared `geometry::direction_from_angle_deg` helper reused by `EndLine`/`Arc`/`Spline` alike. `angle2` is confirmed (by reading `GetP3` itself) to be the literal p4->p3 direction, not a tangent-of-travel angle. See `spline_golden_value_bows_away_from_the_straight_p1_p4_line`. |
+| `CubicBezier` | `tools/drawTools/toolcurve/vtoolcubicbezier.cpp` | `MISSING` | Missing | A cubic Bezier with EXPLICIT (not angle/length-derived) control points; distinct from `Spline` above, still out of scope for this task. |
+| `CutSpline` | `tools/drawTools/toolpoint/toolsinglepoint/toolcut/vtoolcutspline.cpp` | `MISSING` | Missing | A curve-splitting tool; `Spline` itself now exists, but splitting one at a point along its length remains future work. |
+| `CutArc` | `tools/drawTools/toolpoint/toolsinglepoint/toolcut/vtoolcutarc.cpp` | `MISSING` | Missing | Same note as `CutSpline`: `Arc` now exists, but splitting one remains future work. |
+| `Arc` | `tools/drawTools/toolcurve/vtoolarc.cpp`, `src/libs/vgeometry/varc.cpp` | `ToolKind::Arc` | Implemented-Correct | **New in this task.** Verified against `VToolArc::Create`/`VArc::GetP1()`/`VArc::GetP2()`, read directly from a fresh Seamly2D clone: each endpoint is built via `QLineF(center, center+(radius,0)).setAngle(angle)`, the same `setAngle` convention as `Spline` above — so a point on the arc at `theta` degrees is plain `center + radius*(cos(theta),sin(theta))` with no sign flip. See `arc_golden_value_matches_hand_calculated_point_at_forty_five_degrees`. |
 | `ArcWithLength` | `tools/drawTools/toolcurve/vtoolarcwithlength.cpp` | `MISSING` | Missing | Curve tool, same scope note as `Spline`. |
 | `SplinePath` | `tools/drawTools/toolcurve/vtoolsplinepath.cpp` | `MISSING` | Missing | Curve tool, same scope note as `Spline`. |
 | `CubicBezierPath` | `tools/drawTools/toolcurve/vtoolcubicbezierpath.cpp` | `MISSING` | Missing | Curve tool, same scope note as `Spline`. |
@@ -78,12 +78,14 @@ Status legend:
 
 ## Summary
 
-- **Implemented-Correct: 14** — `BasePoint`, `EndLine`, `Line`, `AlongLine`,
+- **Implemented-Correct: 16** — `BasePoint`, `EndLine`, `Line`, `AlongLine`,
   `Normal`, `Bisector`, `Height`, `Midpoint`, `Piece` (verified in Part B,
-  no fixes needed), plus `ShoulderPoint`, `LineIntersect`,
-  `PointOfIntersection`, `Triangle`, `PointOfContact` (newly implemented in
-  Part C).
-- **Missing: 34**
+  no fixes needed), `ShoulderPoint`, `LineIntersect`,
+  `PointOfIntersection`, `Triangle`, `PointOfContact` (implemented in
+  Part C), plus `Arc` and `Spline` (newly implemented in this task — the
+  first two curve/`GeoObject`-producing tools in this codebase, as opposed
+  to every earlier tool producing only a `Point`).
+- **Missing: 32**
 - **N/A: 7** — `Arrow`, `SinglePoint`, `DoublePoint`, `LinePoint`,
   `AbstractSpline`, `Group`, `LAST_ONE_DO_NOT_USE`.
 
@@ -92,4 +94,17 @@ tool's geometry already matched Seamly2D's actual behavior once the exact
 source was read and hand-verified. The five Part C tools were implemented
 end-to-end (through the CLI's action-script layer only — the GUI remains
 read-only per this project's current design) following the identical
-seven-step pattern used for the original five construction tools.
+seven-step pattern used for the original five construction tools. This
+task's `Arc`/`Spline` addition extends that same pattern to curve geometry:
+a new `GeoObject` variant each (`ArcData`/`SplineData`), a `ToolKind`
+variant, a `Document::add_*` constructor, a `recompute_all` arm, XML
+read/write support under their own `<arc>`/`<spline>` tags, an
+action-script `add_arc`/`add_spline` op, and tessellation into
+`render::DrawCommand::Polyline`/`image_export`'s own open-polyline drawing
+for both the GUI and PNG-export rendering paths. `fixtures/actions/
+shirt_front.json`'s neck and armhole curves were refactored from a ~10-step
+point-of-intersection/midpoint chain each into a single `add_spline` action
+each (see the fixture's own comments and `crates/cli/tests/
+shirt_front_shape.rs`'s header comment for how the chosen angle/length
+formulas reproduce, via exact quadratic-to-cubic Bezier degree elevation,
+the identical curve shape the old chain traced by hand).

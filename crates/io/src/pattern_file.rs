@@ -353,6 +353,49 @@ fn write_tool_record(writer: &mut Writer<Vec<u8>>, record: &ToolRecord) -> std::
                     Ok(())
                 })?;
         }
+        ToolKind::Arc {
+            name,
+            center,
+            radius_formula,
+            start_angle_formula,
+            end_angle_formula,
+        } => {
+            // A distinct <arc> element, not a `<point type="...">` variant:
+            // an Arc produces a curve GeoObject, not a Point, matching how
+            // <piece> already got its own distinct tag rather than reusing
+            // <point> for the same reason.
+            writer
+                .create_element("arc")
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the arc's user-facing label
+                .with_attribute(("center", center.raw().to_string().as_str())) // the circle's center, by id
+                .with_attribute(("radius", radius_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .with_attribute(("startAngle", start_angle_formula.as_str())) // likewise, the start-angle formula string, unevaluated
+                .with_attribute(("endAngle", end_angle_formula.as_str())) // likewise, the end-angle formula string, unevaluated
+                .write_empty()?; // a self-closing <arc .../>: no child content needed
+        }
+        ToolKind::Spline {
+            name,
+            p1,
+            p4,
+            angle1_formula,
+            length1_formula,
+            angle2_formula,
+            length2_formula,
+        } => {
+            // A distinct <spline> element, same rationale as <arc> above.
+            writer
+                .create_element("spline")
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the curve's user-facing label
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // the curve's first endpoint, by id
+                .with_attribute(("secondPoint", p4.raw().to_string().as_str())) // the curve's second endpoint, by id
+                .with_attribute(("angle1", angle1_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .with_attribute(("length1", length1_formula.as_str())) // likewise, p1's handle-length formula string, unevaluated
+                .with_attribute(("angle2", angle2_formula.as_str())) // likewise, p4's tangent-angle formula string, unevaluated
+                .with_attribute(("length2", length2_formula.as_str())) // likewise, p4's handle-length formula string, unevaluated
+                .write_empty()?; // a self-closing <spline .../>: no child content needed
+        }
     }
     Ok(()) // this record's element was written successfully
 }
@@ -399,6 +442,14 @@ pub fn deserialize_document(xml: &str) -> Result<(Document, Option<String>), Pat
                     }
                     "line" => {
                         let record = parse_line(&start)?; // parse id/firstPoint/secondPoint attributes into a ToolRecord
+                        history.push(record); // record it in document order
+                    }
+                    "arc" => {
+                        let record = parse_arc(&start)?; // parse id/name/center/radius/startAngle/endAngle attributes into a ToolRecord
+                        history.push(record); // record it in document order
+                    }
+                    "spline" => {
+                        let record = parse_spline(&start)?; // parse id/name/firstPoint/secondPoint/angle1/length1/angle2/length2 attributes into a ToolRecord
                         history.push(record); // record it in document order
                     }
                     "piece" => {
@@ -701,6 +752,52 @@ fn parse_line(start: &BytesStart) -> Result<ToolRecord, PatternFileError> {
     Ok(ToolRecord {
         id,                              // the id parsed above
         kind: ToolKind::Line { p1, p2 }, // a straight line between two existing points, referenced by id
+    })
+}
+
+/// Parses an `<arc .../>` element's attributes into a [`ToolRecord`].
+fn parse_arc(start: &BytesStart) -> Result<ToolRecord, PatternFileError> {
+    let attrs = read_attributes(start)?; // collect every attribute on this element into a name -> value map
+    let id = parse_id("arc", &attrs, "id")?; // this tool's own id
+    let name = require_attr("arc", &attrs, "name")?.to_string(); // the arc's user-facing label
+    let center = parse_id("arc", &attrs, "center")?; // the circle's center, by id
+    let radius_formula = require_attr("arc", &attrs, "radius")?.to_string(); // the radius formula, unevaluated
+    let start_angle_formula = require_attr("arc", &attrs, "startAngle")?.to_string(); // the start-angle formula, unevaluated
+    let end_angle_formula = require_attr("arc", &attrs, "endAngle")?.to_string(); // the end-angle formula, unevaluated
+    Ok(ToolRecord {
+        id, // the id parsed above
+        kind: ToolKind::Arc {
+            name,
+            center,
+            radius_formula,
+            start_angle_formula,
+            end_angle_formula,
+        },
+    })
+}
+
+/// Parses a `<spline .../>` element's attributes into a [`ToolRecord`].
+fn parse_spline(start: &BytesStart) -> Result<ToolRecord, PatternFileError> {
+    let attrs = read_attributes(start)?; // collect every attribute on this element into a name -> value map
+    let id = parse_id("spline", &attrs, "id")?; // this tool's own id
+    let name = require_attr("spline", &attrs, "name")?.to_string(); // the curve's user-facing label
+    let p1 = parse_id("spline", &attrs, "firstPoint")?; // the curve's first endpoint, by id
+    let p4 = parse_id("spline", &attrs, "secondPoint")?; // the curve's second endpoint, by id
+    let angle1_formula = require_attr("spline", &attrs, "angle1")?.to_string(); // p1's tangent-angle formula, unevaluated
+    let length1_formula = require_attr("spline", &attrs, "length1")?.to_string(); // p1's handle-length formula, unevaluated
+    let angle2_formula = require_attr("spline", &attrs, "angle2")?.to_string(); // p4's tangent-angle formula, unevaluated
+    let length2_formula = require_attr("spline", &attrs, "length2")?.to_string(); // p4's handle-length formula, unevaluated
+    Ok(ToolRecord {
+        id, // the id parsed above
+        kind: ToolKind::Spline {
+            name,
+            p1,
+            p4,
+            angle1_formula,
+            length1_formula,
+            angle2_formula,
+            length2_formula,
+        },
     })
 }
 
@@ -1189,6 +1286,41 @@ mod tests {
             .unwrap();
 
         let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn arc_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let center = original.add_base_point("Center", 5.0, 3.0);
+        original.add_arc("A", center, "10", "0", "90").unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        assert!(xml.contains("<arc ")); // its own distinct element tag, not a <point type="...">
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn spline_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1 = original.add_base_point("P1", 0.0, 0.0);
+        let p4 = original.add_base_point("P4", 10.0, 0.0);
+        original
+            .add_spline("S", p1, p4, "90", "3", "90", "3")
+            .unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        assert!(xml.contains("<spline ")); // its own distinct element tag, not a <point type="...">
         let (restored, _path) = deserialize_document(&xml).unwrap();
 
         assert_eq!(

@@ -2,7 +2,7 @@ use std::collections::BTreeMap; // ordered map for `objects`, see the field comm
 use std::collections::HashMap; // still used for `variables`, which has no ordering requirement
 
 use crate::error::ContainerError;
-use crate::geo::{GeoObject, LineData, PieceData, PointData};
+use crate::geo::{ArcData, GeoObject, LineData, PieceData, PointData, SplineData};
 use crate::id::ObjectId;
 use crate::variable::{Variable, VariableKind};
 
@@ -120,6 +120,36 @@ impl PatternData {
                 id,
                 expected: "Piece",
             }), // id exists but names something else, e.g. a Point or Line
+            None => Err(ContainerError::ObjectNotFound(id)), // no object at all under this id
+        }
+    }
+
+    /// Looks up `id` expecting it to hold an [`ArcData`].
+    ///
+    /// Same not-found/wrong-type distinction as [`Self::get_point`], mirrored
+    /// for the `Arc` variant.
+    pub fn get_arc(&self, id: ObjectId) -> Result<&ArcData, ContainerError> {
+        match self.objects.get(&id) {
+            Some(GeoObject::Arc(arc)) => Ok(arc), // id exists and holds an arc: exactly what the caller needs
+            Some(_) => Err(ContainerError::WrongObjectType {
+                id,
+                expected: "Arc",
+            }), // id exists but names something else
+            None => Err(ContainerError::ObjectNotFound(id)), // no object at all under this id
+        }
+    }
+
+    /// Looks up `id` expecting it to hold a [`SplineData`].
+    ///
+    /// Same not-found/wrong-type distinction as [`Self::get_point`], mirrored
+    /// for the `Spline` variant.
+    pub fn get_spline(&self, id: ObjectId) -> Result<&SplineData, ContainerError> {
+        match self.objects.get(&id) {
+            Some(GeoObject::Spline(spline)) => Ok(spline), // id exists and holds a spline: exactly what the caller needs
+            Some(_) => Err(ContainerError::WrongObjectType {
+                id,
+                expected: "Spline",
+            }), // id exists but names something else
             None => Err(ContainerError::ObjectNotFound(id)), // no object at all under this id
         }
     }

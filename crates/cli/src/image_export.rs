@@ -10,6 +10,14 @@ use thiserror::Error; // brings in the `Error` derive macro used by `ImageExport
 /// the inline nested-generic spelling of this exact shape).
 type ResolvedPiece = (Vec<(f64, f64)>, Option<Vec<(f64, f64)>>);
 
+/// How many straight-line segments an `Arc`/`Spline` curve is tessellated
+/// into for drawing. Mirrors `render::CURVE_SAMPLE_SEGMENTS` — this module
+/// draws directly via `plotters` rather than consuming `render::DrawCommand`,
+/// so it keeps its own copy of the same named constant instead of a magic
+/// number, exactly matching that crate's own reasoning for why the sample
+/// count deserves a name.
+const CURVE_SAMPLE_SEGMENTS: usize = 32;
+
 /// Everything that can go wrong turning a resolved [`core_lib::PatternData`]
 /// into a PNG file.
 #[derive(Debug, Error)] // Debug: printable in test failures/CLI error messages; Error: implements std::error::Error via thiserror
@@ -80,6 +88,7 @@ pub fn export_pattern_image(
     let mut resolved_points: Vec<(core_lib::ObjectId, f64, f64)> = Vec::new(); // every Point object's id and coordinates
     let mut resolved_lines: Vec<((f64, f64), (f64, f64))> = Vec::new(); // every Line's two resolved endpoints
     let mut resolved_pieces: Vec<ResolvedPiece> = Vec::new(); // every Piece's contour, plus its seam allowance if any
+    let mut resolved_polylines: Vec<Vec<(f64, f64)>> = Vec::new(); // every Arc/Spline, tessellated into an open sample-point chain
 
     for (id, object) in data.objects() {
         // walk every object in `data`, in the same deterministic ascending-id order `render::render` relies on
@@ -95,6 +104,29 @@ pub fn export_pattern_image(
             core_lib::GeoObject::Piece(piece) => {
                 // both already resolved coordinate lists; no further lookups needed
                 resolved_pieces.push((piece.contour.clone(), piece.seam_allowance.clone()));
+            }
+            core_lib::GeoObject::Arc(arc) => {
+                let mut points = Vec::with_capacity(CURVE_SAMPLE_SEGMENTS + 1); // one sample per segment boundary, including both ends
+                for i in 0..=CURVE_SAMPLE_SEGMENTS {
+                    let t = i as f64 / CURVE_SAMPLE_SEGMENTS as f64; // 0.0..=1.0, evenly spaced across the sweep
+                    let theta_deg =
+                        arc.start_angle_deg + t * (arc.end_angle_deg - arc.start_angle_deg); // linearly interpolate the angle across the sweep
+                    let theta_rad = theta_deg.to_radians(); // degrees -> radians before cos/sin, same convention as core_lib::geo::ArcData's own doc comment
+                    let x = arc.center.0 + arc.radius * theta_rad.cos(); // center + radius*cos(theta)
+                    let y = arc.center.1 + arc.radius * theta_rad.sin(); // center + radius*sin(theta)
+                    points.push((x, y));
+                }
+                resolved_polylines.push(points);
+            }
+            core_lib::GeoObject::Spline(spline) => {
+                let mut points = Vec::with_capacity(CURVE_SAMPLE_SEGMENTS + 1); // one sample per segment boundary, including both ends
+                for i in 0..=CURVE_SAMPLE_SEGMENTS {
+                    let t = i as f64 / CURVE_SAMPLE_SEGMENTS as f64; // 0.0..=1.0, evenly spaced along the curve
+                    points.push(core_lib::geometry::cubic_bezier_point(
+                        spline.p1, spline.p2, spline.p3, spline.p4, t,
+                    )); // reuses core_lib's own Bezier formula rather than reimplementing it here
+                }
+                resolved_polylines.push(points);
             }
         }
     }
@@ -121,6 +153,14 @@ pub fn export_pattern_image(
         if let Some(sa) = seam_allowance {
             all_coords.extend(sa.iter().copied()); // the offset seam-allowance boundary, genuinely new coordinates not present anywhere else
         }
+    }
+    for points in &resolved_polylines {
+        // Arc/Spline sample points: genuinely new coordinates (interior
+        // control points/arc sweep extremes) that don't necessarily
+        // coincide with any standalone Point object, so — same rationale as
+        // the seam-allowance loop above — leaving these out would risk
+        // silently clipping a curve at the image edge.
+        all_coords.extend(points.iter().copied());
     }
 
     // Seeds the running bounding box from the first coordinate, then widens
@@ -216,6 +256,14 @@ pub fn export_pattern_image(
         }
     }
 
+    // Draws every Arc/Spline's tessellated sample chain as an OPEN polyline
+    // (no wrap-around edge, unlike a piece's closed contour) — in a distinct
+    // green so curve tessellation reads as its own visual category next to
+    // the black construction lines and blue piece outlines.
+    for points in &resolved_polylines {
+        draw_open_polyline(&root, &camera, points, &RGBColor(40, 160, 80))?;
+    }
+
     // Draws every point LAST: a small filled marker plus its name label,
     // offset a few pixels up-and-right so the text doesn't sit exactly on
     // top of the marker itself.
@@ -277,6 +325,37 @@ fn draw_closed_polygon(
         .map_err(|err| ImageExportError::Drawing(err.to_string()))?; // propagate a drawing failure rather than silently skipping this edge
     }
     Ok(()) // every edge of this polygon drawn successfully
+}
+
+/// Draws `points` (already in pattern-space coordinates) as an OPEN
+/// sequence of connected line segments in `color`: every consecutive pair
+/// of vertices, with NO wrap-around edge back to the first vertex — the
+/// distinction from [`draw_closed_polygon`] above, which a piece's own
+/// closed contour needs but a curve's open tessellation must not have.
+fn draw_open_polyline(
+    root: &DrawingArea<BitMapBackend, plotters::coord::Shift>, // the same bitmap canvas export_pattern_image itself draws onto
+    camera: &app::camera::Camera, // the same pattern-space -> screen-pixel conversion export_pattern_image itself uses
+    points: &[(f64, f64)], // this curve's sample points, in order, in pattern-space coordinates
+    color: &RGBColor,      // this curve's stroke color
+) -> Result<(), ImageExportError> {
+    if points.len() < 2 {
+        // fewer than 2 points can't form any edge at all: nothing to draw
+        return Ok(());
+    }
+    let screen_points: Vec<(i32, i32)> = points
+        .iter()
+        .map(|&(x, y)| camera.to_screen(x, y)) // pattern space -> screen pixels, one sample at a time
+        .map(|(sx, sy)| (sx as i32, sy as i32)) // BitMapBackend's own pixel coordinates are i32, not the f32 Camera::to_screen returns
+        .collect();
+    for pair in screen_points.windows(2) {
+        // draw every consecutive sample pair as one segment; windows(2) naturally stops short of any wrap-around edge
+        root.draw(&PathElement::new(
+            vec![pair[0], pair[1]], // this segment's two screen-pixel endpoints
+            ShapeStyle::from(color).stroke_width(2), // this curve's own distinguishing color, matching draw_closed_polygon's own stroke width
+        ))
+        .map_err(|err| ImageExportError::Drawing(err.to_string()))?; // propagate a drawing failure rather than silently skipping this segment
+    }
+    Ok(()) // every segment of this polyline drawn successfully
 }
 
 #[cfg(test)]

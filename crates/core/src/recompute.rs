@@ -2,7 +2,10 @@ use thiserror::Error; // brings in the `Error` derive macro used by `PatternErro
 
 use crate::document::{Document, ToolKind}; // the ordered tool history this module walks
 use crate::formula::{eval_formula, flatten_variables}; // Phase 2's formula pipeline, used by EndLine
-use crate::{ContainerError, GeoObject, LineData, ObjectId, PatternData, PieceData, PointData}; // Phase 1's container and geometry types
+use crate::{
+    ArcData, ContainerError, GeoObject, LineData, ObjectId, PatternData, PieceData, PointData,
+    SplineData,
+}; // Phase 1's container and geometry types, plus Part A/B's new curve GeoObject payloads
 
 /// Everything that can go wrong turning a [`Document`] into a resolved
 /// [`PatternData`].
@@ -90,8 +93,9 @@ pub fn recompute_all(doc: &Document) -> Result<PatternData, PatternError> {
                 let vars = flatten_variables(&data); // snapshot every variable resolved so far, for these formulas to reference
                 let angle = eval_formula(angle_formula, &vars)?; // evaluate the angle formula (degrees, Phase 2's convention)
                 let length = eval_formula(length_formula, &vars)?; // evaluate the length formula
-                let x = base.x + length * angle.to_radians().cos(); // degrees -> radians before cos, matching Phase 2's trig convention
-                let y = base.y + length * angle.to_radians().sin(); // degrees -> radians before sin, same convention
+                let dir = crate::geometry::direction_from_angle_deg(angle); // shared angle-to-unit-direction helper, also used by Part A/B's Arc/Spline arms below
+                let x = base.x + length * dir.0; // base + length*cos(angle)
+                let y = base.y + length * dir.1; // base + length*sin(angle)
                 let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
                 data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
             }
@@ -525,6 +529,60 @@ pub fn recompute_all(doc: &Document) -> Result<PatternData, PatternError> {
                 };
                 let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
                 data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
+            ToolKind::Arc {
+                center,
+                radius_formula,
+                start_angle_formula,
+                end_angle_formula,
+                ..
+            } => {
+                let center_point = resolve_point(&data, *center)?; // resolve the circle's center
+                let vars = flatten_variables(&data); // snapshot every variable resolved so far, for these formulas to reference
+                let radius = eval_formula(radius_formula, &vars)?; // evaluate the radius formula
+                let start_angle_deg = eval_formula(start_angle_formula, &vars)?; // evaluate the sweep's starting-angle formula, in degrees
+                let end_angle_deg = eval_formula(end_angle_formula, &vars)?; // evaluate the sweep's ending-angle formula, in degrees
+                if radius <= 0.0 {
+                    // mirrors ShoulderPoint's own guard above: a non-positive radius has no sensible arc
+                    return Err(PatternError::DegenerateGeometry(
+                        "Arc: radius must evaluate to a positive value".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+                let arc = GeoObject::Arc(ArcData {
+                    center: (center_point.x, center_point.y), // the arc's own center, already resolved
+                    radius,                                   // validated positive above
+                    start_angle_deg, // the sweep's starting angle, in degrees
+                    end_angle_deg,   // the sweep's ending angle, in degrees
+                });
+                data.insert_with_id(record.id, arc)?; // place it under this tool's assigned id
+            }
+            ToolKind::Spline {
+                p1,
+                p4,
+                angle1_formula,
+                length1_formula,
+                angle2_formula,
+                length2_formula,
+                ..
+            } => {
+                let point1 = resolve_point(&data, *p1)?; // resolve the curve's first endpoint
+                let point4 = resolve_point(&data, *p4)?; // resolve the curve's second endpoint
+                let vars = flatten_variables(&data); // snapshot every variable resolved so far, for these formulas to reference
+                let angle1 = eval_formula(angle1_formula, &vars)?; // evaluate p1's own tangent-angle formula, in degrees
+                let length1 = eval_formula(length1_formula, &vars)?; // evaluate p1's own control-handle length formula
+                let angle2 = eval_formula(angle2_formula, &vars)?; // evaluate p4's own tangent-angle formula, in degrees
+                let length2 = eval_formula(length2_formula, &vars)?; // evaluate p4's own control-handle length formula
+                let dir1 = crate::geometry::direction_from_angle_deg(angle1); // p1->p2 unit direction, mirrors VSpline::GetP2's own QLineF::setAngle convention
+                let dir2 = crate::geometry::direction_from_angle_deg(angle2); // p4->p3 unit direction, mirrors VSpline::GetP3's own convention
+                let p2 = (point1.x + length1 * dir1.0, point1.y + length1 * dir1.1); // P2 = P1 + length1*(cos(angle1),sin(angle1))
+                let p3 = (point4.x + length2 * dir2.0, point4.y + length2 * dir2.1); // P3 = P4 + length2*(cos(angle2),sin(angle2))
+                let spline = GeoObject::Spline(SplineData {
+                    p1: (point1.x, point1.y), // the curve's first endpoint, already resolved
+                    p2,                       // derived interior control point, computed above
+                    p3,                       // derived interior control point, computed above
+                    p4: (point4.x, point4.y), // the curve's second endpoint, already resolved
+                });
+                data.insert_with_id(record.id, spline)?; // place it under this tool's assigned id
             }
         }
     }
@@ -1424,5 +1482,100 @@ mod tests {
 
         let err = recompute_all(&doc).unwrap_err();
         assert!(matches!(err, PatternError::DegenerateGeometry(_)));
+    }
+
+    // ===================================================================
+    // This task's Part A/B: golden parity tests for the two new curve
+    // tools, Arc and Spline, grounded in Seamly2D's actual VArc/VSpline
+    // source (VArc::GetP1/GetP2 and VSpline::GetP2/GetP3, both built via
+    // QLineF::setAngle) — the same angle convention already proven to need
+    // no sign flip in this crate's y-up coordinates by the EndLine/Normal
+    // parity tests above.
+    // ===================================================================
+
+    #[test]
+    fn arc_golden_value_matches_hand_calculated_point_at_forty_five_degrees() {
+        // center=(5,3), radius=10, start_angle=0, end_angle=90.
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 5.0, 3.0);
+        let arc = doc.add_arc("A", center, "10", "0", "90").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let resolved = data.get_arc(arc).unwrap();
+        assert!((resolved.center.0 - 5.0).abs() < 1e-9);
+        assert!((resolved.center.1 - 3.0).abs() < 1e-9);
+        assert!((resolved.radius - 10.0).abs() < 1e-9);
+        assert!((resolved.start_angle_deg - 0.0).abs() < 1e-9);
+        assert!((resolved.end_angle_deg - 90.0).abs() < 1e-9);
+
+        // A point on the arc at 45 degrees: center + radius*(cos(45deg),sin(45deg)).
+        // Hand-verified: (5,3) + 10*(sqrt(2)/2, sqrt(2)/2) = (5 + 5*sqrt(2), 3 + 5*sqrt(2)).
+        let theta = 45.0_f64.to_radians();
+        let expected_x = resolved.center.0 + resolved.radius * theta.cos();
+        let expected_y = resolved.center.1 + resolved.radius * theta.sin();
+        let hand_x = 5.0 + 5.0 * 2.0_f64.sqrt();
+        let hand_y = 3.0 + 5.0 * 2.0_f64.sqrt();
+        assert!((expected_x - hand_x).abs() < 1e-9);
+        assert!((expected_y - hand_y).abs() < 1e-9);
+        // NOT (5 - 5*sqrt(2), 3 - 5*sqrt(2)): confirms the angle sweeps in the
+        // standard mathematical (counter-clockwise, y-up) direction, matching
+        // VArc::GetP1/GetP2's own QLineF::setAngle convention with no sign flip
+        // — the exact same convention already verified for EndLine/Normal above.
+    }
+
+    #[test]
+    fn arc_non_positive_radius_is_degenerate() {
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 0.0, 0.0);
+        doc.add_arc("A", center, "0", "0", "90").unwrap(); // radius formula evaluates to 0.0
+
+        let err = recompute_all(&doc).unwrap_err();
+        assert!(matches!(err, PatternError::DegenerateGeometry(_)));
+    }
+
+    #[test]
+    fn spline_golden_value_bows_away_from_the_straight_p1_p4_line() {
+        // p1=(0,0), p4=(10,0). angle1=90 (straight up from p1), length1=3.
+        // angle2=90 — per VSpline::GetP3's own QLineF(p4, p4+(c2Length,0))
+        // .setAngle(angle2) construction (verified by reading the actual
+        // Seamly2D source), angle2 is measured as the p4->p3 DIRECTION
+        // itself, not the tangent-of-travel-at-p4 (which would point the
+        // opposite way) — so angle2=90 also points straight up, giving
+        // P3 directly above p4, not below it.
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p4 = doc.add_base_point("P4", 10.0, 0.0);
+        let spline = doc.add_spline("S", p1, p4, "90", "3", "90", "3").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let resolved = data.get_spline(spline).unwrap();
+
+        // Hand-calculated: P2 = (0,0) + 3*(cos(90deg),sin(90deg)) = (0,3).
+        assert!((resolved.p2.0 - 0.0).abs() < 1e-9);
+        assert!((resolved.p2.1 - 3.0).abs() < 1e-9);
+        // Hand-calculated: P3 = (10,0) + 3*(cos(90deg),sin(90deg)) = (10,3).
+        assert!((resolved.p3.0 - 10.0).abs() < 1e-9);
+        assert!((resolved.p3.1 - 3.0).abs() < 1e-9);
+
+        // Hand-calculated point at t=0.5, via the cubic Bezier Bernstein
+        // coefficients (mt3=0.125, 3*mt2*t=0.375, 3*mt*t2=0.375, t3=0.125):
+        // x = 0.375*p2.x + 0.375*p3.x = 0.375*0 + 0.375*10 = 3.75... plus
+        // 0.125*p1.x + 0.125*p4.x = 0 + 1.25 => x = 5.0.
+        // y = 0.375*p2.y + 0.375*p3.y = 0.375*3 + 0.375*3 = 2.25 (p1.y/p4.y are both 0).
+        let midpoint = core_lib_cubic_bezier_point(&data, spline, 0.5);
+        assert!((midpoint.0 - 5.0).abs() < 1e-9);
+        assert!((midpoint.1 - 2.25).abs() < 1e-9);
+        // The curve genuinely bows away from the straight p1-p4 line (y=0):
+        // its t=0.5 point sits meaningfully above it, not on it.
+        assert!(midpoint.1 > 1.0);
+    }
+
+    /// Small local wrapper around `crate::geometry::cubic_bezier_point`,
+    /// applied to an already-resolved `Spline` object's own four control
+    /// points — kept local to this test module rather than adding a
+    /// `PatternData`-level convenience method for a single test's sake.
+    fn core_lib_cubic_bezier_point(data: &PatternData, spline: ObjectId, t: f64) -> (f64, f64) {
+        let resolved = data.get_spline(spline).unwrap();
+        crate::geometry::cubic_bezier_point(resolved.p1, resolved.p2, resolved.p3, resolved.p4, t)
     }
 }

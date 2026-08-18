@@ -29,6 +29,26 @@ impl Camera {
         let screen_y = (-y + self.offset_y) * self.zoom; // negate y (see doc comment above), then shift and scale the same way
         (screen_x as f32, screen_y as f32) // egui's painter API takes f32, not f64
     }
+
+    /// Converts one screen-pixel position back to pattern space — the
+    /// mathematically exact inverse of [`Self::to_screen`].
+    ///
+    /// Used by Phase 11's click handling: a canvas click arrives in screen
+    /// pixels, but hit-testing against `PatternData` needs pattern-space
+    /// coordinates. Each step here undoes the corresponding `to_screen`
+    /// step in reverse order:
+    /// `to_screen` computes `screen_x = (x + offset_x) * zoom`, so
+    /// solving for `x` gives `x = screen_x / zoom - offset_x`.
+    /// `to_screen` computes `screen_y = (-y + offset_y) * zoom`, so
+    /// solving for `y` gives `y = offset_y - screen_y / zoom` — this is
+    /// also what correctly un-negates the y-flip `to_screen` applied,
+    /// since isolating `y` (not `-y`) on one side naturally reintroduces
+    /// the sign flip as part of solving the equation.
+    pub fn to_pattern(&self, screen_x: f32, screen_y: f32) -> (f64, f64) {
+        let x = (screen_x as f64 / self.zoom) - self.offset_x; // inverse of `(x + offset_x) * zoom`: divide then un-shift
+        let y = self.offset_y - (screen_y as f64 / self.zoom); // inverse of `(-y + offset_y) * zoom`: divide, then subtract from offset_y (undoes both the shift and the negation)
+        (x, y) // pattern-space coordinates, as f64 to match PatternData's own coordinate type
+    }
 }
 
 impl Default for Camera {
@@ -92,5 +112,49 @@ mod tests {
         let camera = Camera::default();
         assert!(camera.zoom.is_finite());
         assert!(camera.zoom > 0.0);
+    }
+
+    #[test]
+    fn to_pattern_matches_hand_computed_coordinates() {
+        let camera = Camera {
+            offset_x: 10.0,
+            offset_y: 20.0,
+            zoom: 2.0,
+        };
+
+        // Same (screen, pattern) pairs as to_screen's own test, just read the other direction.
+        let cases = [
+            (20.0_f32, 40.0_f32, 0.0, 0.0),
+            (30.0, 30.0, 5.0, 5.0),
+            (14.0, 32.0, -3.0, 4.0),
+        ];
+
+        for (screen_x, screen_y, expected_x, expected_y) in cases {
+            let (x, y) = camera.to_pattern(screen_x, screen_y);
+            assert!(
+                (x - expected_x).abs() < 1e-9,
+                "x mismatch for ({screen_x}, {screen_y}): got {x}, expected {expected_x}"
+            );
+            assert!(
+                (y - expected_y).abs() < 1e-9,
+                "y mismatch for ({screen_x}, {screen_y}): got {y}, expected {expected_y}"
+            );
+        }
+    }
+
+    #[test]
+    fn to_pattern_is_the_exact_inverse_of_to_screen() {
+        let camera = Camera {
+            offset_x: -7.5,
+            offset_y: 42.0,
+            zoom: 3.25,
+        };
+
+        for (x, y) in [(0.0, 0.0), (12.5, -8.25), (-100.0, 33.3)] {
+            let (screen_x, screen_y) = camera.to_screen(x, y);
+            let (round_tripped_x, round_tripped_y) = camera.to_pattern(screen_x, screen_y);
+            assert!((round_tripped_x - x).abs() < 1e-4); // f32 screen coordinates limit round-trip precision slightly
+            assert!((round_tripped_y - y).abs() < 1e-4);
+        }
     }
 }

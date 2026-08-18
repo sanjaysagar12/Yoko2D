@@ -77,6 +77,28 @@ fn references_of(kind: &ToolKind) -> Vec<ObjectId> {
         } => vec![*point, *line_p1, *line_p2], // depends on the projected point plus both points defining the line
         ToolKind::Midpoint { p1, p2, .. } => vec![*p1, *p2], // depends on both segment endpoints
         ToolKind::Piece { nodes, .. } => nodes.iter().map(|node| node.point).collect(), // every point still used as a piece boundary vertex, so remove_tool correctly blocks deleting any of them
+        ToolKind::ShoulderPoint {
+            p1_line,
+            p2_line,
+            shoulder,
+            ..
+        } => vec![*p1_line, *p2_line, *shoulder], // depends on both ray-defining points plus the circle-center point
+        ToolKind::LineIntersect {
+            p1_line1,
+            p2_line1,
+            p1_line2,
+            p2_line2,
+            ..
+        } => vec![*p1_line1, *p2_line1, *p1_line2, *p2_line2], // depends on all four points defining the two lines
+        ToolKind::PointOfIntersection { p1, p2, .. } => vec![*p1, *p2], // depends on the point supplying x and the point supplying y
+        ToolKind::Triangle {
+            axis_p1,
+            axis_p2,
+            hypotenuse_p1,
+            hypotenuse_p2,
+            ..
+        } => vec![*axis_p1, *axis_p2, *hypotenuse_p1, *hypotenuse_p2], // depends on both axis points plus both hypotenuse points
+        ToolKind::PointOfContact { center, p1, p2, .. } => vec![*center, *p1, *p2], // depends on the circle-center point plus both segment endpoints
     }
 }
 
@@ -214,6 +236,82 @@ pub enum ToolKind {
         name: String,                   // the piece's user-facing label
         nodes: Vec<PieceNode>, // the boundary vertices, in order, each referencing an existing point
         seam_allowance_formula: String, // a formula string evaluating to the seam-allowance width; 0.0 means no seam allowance
+    },
+
+    /// A new point along the ray from `p1_line` through `p2_line` (extended
+    /// past `p2_line`), at `length_formula` distance from `shoulder` —
+    /// mirrors Seamly2D's `VToolShoulderPoint::FindPoint`: intersect a
+    /// circle of radius `length_formula` centered at `shoulder` with that
+    /// ray, and pick whichever candidate lies farther from `p1_line` than
+    /// `p2_line` does, in the ray's own forward direction. Used to find a
+    /// garment's shoulder point: a fixed distance from a reference point
+    /// (`shoulder`), landing on the shoulder-slope line extended past its
+    /// nearer endpoint.
+    ShoulderPoint {
+        name: String,           // the point's user-facing label
+        p1_line: ObjectId,      // the ray's own starting point
+        p2_line: ObjectId, // the point defining the ray's direction (and the "already past this" threshold)
+        shoulder: ObjectId, // the circle's center
+        length_formula: String, // a formula string evaluating to the circle's radius
+    },
+
+    /// A new point where the infinite lines through `p1_line1`/`p2_line1`
+    /// and `p1_line2`/`p2_line2` cross. Mirrors Seamly2D's
+    /// `VToolLineIntersect::Create`. Pure geometry, no formula: the two
+    /// lines either cross at a unique point or don't (parallel/collinear).
+    LineIntersect {
+        name: String,       // the point's user-facing label
+        p1_line1: ObjectId, // the first line's first defining point
+        p2_line1: ObjectId, // the first line's second defining point
+        p1_line2: ObjectId, // the second line's first defining point
+        p2_line2: ObjectId, // the second line's second defining point
+    },
+
+    /// A new point combining `p1`'s x coordinate with `p2`'s y coordinate —
+    /// mirrors Seamly2D's `PointIntersectXYTool::Create` (internally
+    /// `"intersectXY"`), which is the plain, axis-aligned member of the
+    /// "PointOfIntersection*" tool family (distinct from
+    /// `PointOfIntersectionArcs`/`Circles`/`Curves`, which remain out of
+    /// scope). Pure geometry, no formula, and never degenerate: any two
+    /// points (even coincident ones) always produce a well-defined answer.
+    PointOfIntersection {
+        name: String, // the point's user-facing label
+        p1: ObjectId, // the point this one takes its x coordinate from
+        p2: ObjectId, // the point this one takes its y coordinate from
+    },
+
+    /// A new point on the infinite line through `axis_p1`/`axis_p2` where
+    /// that line first sees `hypotenuse_p1`-`hypotenuse_p2` at a right
+    /// angle, in the forward `axis_p1`-\>`axis_p2` direction from where the
+    /// axis crosses the hypotenuse. Mirrors Seamly2D's
+    /// `VToolTriangle::FindPoint`'s actual geometric effect — Seamly2D
+    /// itself computes this via a fragile 1-pixel-per-step numeric search
+    /// for the first point where the law-of-cosines angle at that point
+    /// drops to <=90 degrees; this is the exact closed-form equivalent
+    /// (Thales' theorem: that condition holds exactly on the circle whose
+    /// diameter is the `hypotenuse_p1`-`hypotenuse_p2` segment), computed
+    /// directly rather than searched for. Used to drop a right-angle
+    /// construction point onto a reference axis from a diagonal edge.
+    Triangle {
+        name: String,            // the point's user-facing label
+        axis_p1: ObjectId,       // the reference line's first defining point
+        axis_p2: ObjectId, // the reference line's second defining point, also the forward-search direction
+        hypotenuse_p1: ObjectId, // one endpoint of the segment this point forms a right angle with
+        hypotenuse_p2: ObjectId, // the other endpoint of that segment
+    },
+
+    /// A new point where a circle of radius `radius_formula` centered at
+    /// `center` crosses the segment `p1`-`p2` — mirrors Seamly2D's
+    /// `VToolPointOfContact::FindPoint`. When the circle crosses the
+    /// segment twice, prefers whichever candidate actually lies within the
+    /// finite segment (not just the infinite line through it); if both or
+    /// neither qualify, prefers whichever is closer to `p1`.
+    PointOfContact {
+        name: String,           // the point's user-facing label
+        center: ObjectId,       // the circle's center
+        p1: ObjectId,           // the segment's first endpoint
+        p2: ObjectId,           // the segment's second endpoint
+        radius_formula: String, // a formula string evaluating to the circle's radius
     },
 }
 
@@ -588,6 +686,177 @@ impl Document {
             name: name.into(), // convert the caller's name into an owned String
             nodes,             // every node already validated above
             seam_allowance_formula: seam_allowance_formula.into(), // convert the caller's formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point on the ray from `p1_line` through `p2_line` (extended
+    /// past `p2_line`), `length_formula` units from `shoulder`.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `p1_line`, then `p2_line`, then `shoulder`, in that order
+    /// (the order they appear in this method's signature).
+    pub fn add_shoulder_point(
+        &mut self,
+        name: impl Into<String>,
+        p1_line: ObjectId,
+        p2_line: ObjectId,
+        shoulder: ObjectId,
+        length_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1_line) {
+            // check p1_line first: it's the first id in this method's signature
+            return Err(crate::PatternError::MissingDependency(p1_line)); // precise, actionable error naming p1_line
+        }
+        if !self.contains(p2_line) {
+            // p1_line was fine; check p2_line next, matching signature order
+            return Err(crate::PatternError::MissingDependency(p2_line)); // precise, actionable error naming p2_line
+        }
+        if !self.contains(shoulder) {
+            // p1_line/p2_line were fine; check shoulder last, matching signature order
+            return Err(crate::PatternError::MissingDependency(shoulder)); // precise, actionable error naming shoulder
+        }
+        let kind = ToolKind::ShoulderPoint {
+            name: name.into(), // convert the caller's name into an owned String
+            p1_line,           // already validated above
+            p2_line,           // already validated above
+            shoulder,          // already validated above
+            length_formula: length_formula.into(), // convert the caller's length formula into an owned String
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point where the infinite lines through `p1_line1`/`p2_line1`
+    /// and `p1_line2`/`p2_line2` cross.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking all four ids in the order they appear in this method's
+    /// signature.
+    pub fn add_line_intersect(
+        &mut self,
+        name: impl Into<String>,
+        p1_line1: ObjectId,
+        p2_line1: ObjectId,
+        p1_line2: ObjectId,
+        p2_line2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1_line1) {
+            // check p1_line1 first: it's the first id in this method's signature
+            return Err(crate::PatternError::MissingDependency(p1_line1)); // precise, actionable error naming p1_line1
+        }
+        if !self.contains(p2_line1) {
+            return Err(crate::PatternError::MissingDependency(p2_line1)); // precise, actionable error naming p2_line1
+        }
+        if !self.contains(p1_line2) {
+            return Err(crate::PatternError::MissingDependency(p1_line2)); // precise, actionable error naming p1_line2
+        }
+        if !self.contains(p2_line2) {
+            return Err(crate::PatternError::MissingDependency(p2_line2)); // precise, actionable error naming p2_line2
+        }
+        let kind = ToolKind::LineIntersect {
+            name: name.into(), // convert the caller's name into an owned String
+            p1_line1,          // already validated above
+            p2_line1,          // already validated above
+            p1_line2,          // already validated above
+            p2_line2,          // already validated above
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point combining `p1`'s x coordinate with `p2`'s y coordinate.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `p1` then `p2` in order.
+    pub fn add_point_of_intersection(
+        &mut self,
+        name: impl Into<String>,
+        p1: ObjectId,
+        p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(p1) {
+            // check p1 first, so a p1 failure is reported as p1's fault, not silently shadowed by a p2 check
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            // p1 was fine; now check p2 on its own
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        let kind = ToolKind::PointOfIntersection {
+            name: name.into(),
+            p1,
+            p2,
+        }; // both endpoints validated above
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point on the infinite line through `axis_p1`/`axis_p2` that
+    /// forms a right angle with `hypotenuse_p1`/`hypotenuse_p2`, in the
+    /// forward `axis_p1`-\>`axis_p2` direction.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking all four ids in the order they appear in this method's
+    /// signature.
+    pub fn add_triangle(
+        &mut self,
+        name: impl Into<String>,
+        axis_p1: ObjectId,
+        axis_p2: ObjectId,
+        hypotenuse_p1: ObjectId,
+        hypotenuse_p2: ObjectId,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(axis_p1) {
+            // check axis_p1 first: it's the first id in this method's signature
+            return Err(crate::PatternError::MissingDependency(axis_p1)); // precise, actionable error naming axis_p1
+        }
+        if !self.contains(axis_p2) {
+            return Err(crate::PatternError::MissingDependency(axis_p2)); // precise, actionable error naming axis_p2
+        }
+        if !self.contains(hypotenuse_p1) {
+            return Err(crate::PatternError::MissingDependency(hypotenuse_p1)); // precise, actionable error naming hypotenuse_p1
+        }
+        if !self.contains(hypotenuse_p2) {
+            return Err(crate::PatternError::MissingDependency(hypotenuse_p2)); // precise, actionable error naming hypotenuse_p2
+        }
+        let kind = ToolKind::Triangle {
+            name: name.into(), // convert the caller's name into an owned String
+            axis_p1,           // already validated above
+            axis_p2,           // already validated above
+            hypotenuse_p1,     // already validated above
+            hypotenuse_p2,     // already validated above
+        };
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a point where a circle of radius `radius_formula` centered at
+    /// `center` crosses the segment `p1`-`p2`.
+    ///
+    /// Same "validate immediately, only register on success" contract,
+    /// checking `center`, then `p1`, then `p2`, in that order (the order
+    /// they appear in this method's signature).
+    pub fn add_point_of_contact(
+        &mut self,
+        name: impl Into<String>,
+        center: ObjectId,
+        p1: ObjectId,
+        p2: ObjectId,
+        radius_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        if !self.contains(center) {
+            // check center first: it's the first id in this method's signature
+            return Err(crate::PatternError::MissingDependency(center)); // precise, actionable error naming center
+        }
+        if !self.contains(p1) {
+            return Err(crate::PatternError::MissingDependency(p1)); // precise, actionable error naming p1
+        }
+        if !self.contains(p2) {
+            return Err(crate::PatternError::MissingDependency(p2)); // precise, actionable error naming p2
+        }
+        let kind = ToolKind::PointOfContact {
+            name: name.into(), // convert the caller's name into an owned String
+            center,            // already validated above
+            p1,                // already validated above
+            p2,                // already validated above
+            radius_formula: radius_formula.into(), // convert the caller's radius formula into an owned String
         };
         Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
     }
@@ -1287,5 +1556,117 @@ mod tests {
             }
         );
         assert!(doc.contains(a)); // the failed removal changed nothing
+    }
+
+    // Part C: one remove_tool-blocked-by-dependency test per newly added
+    // tool, proving `references_of` was correctly extended for each new
+    // `ToolKind` variant — matching the exact pattern the pre-existing
+    // `remove_tool_blocked_by_a_normal_tools_dependency`/
+    // `remove_tool_blocked_by_a_piece_nodes_dependency` tests already use.
+
+    #[test]
+    fn remove_tool_blocked_by_a_shoulder_points_dependency() {
+        let mut doc = Document::default();
+        let p1_line = doc.add_base_point("P1Line", 0.0, 0.0);
+        let p2_line = doc.add_base_point("P2Line", 10.0, 0.0);
+        let shoulder = doc.add_base_point("Shoulder", 15.0, 8.0);
+        let result = doc
+            .add_shoulder_point("S", p1_line, p2_line, shoulder, "10")
+            .unwrap();
+
+        let err = doc.remove_tool(shoulder).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: shoulder,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(shoulder)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn remove_tool_blocked_by_a_line_intersects_dependency() {
+        let mut doc = Document::default();
+        let p1_line1 = doc.add_base_point("P1L1", 0.0, 0.0);
+        let p2_line1 = doc.add_base_point("P2L1", 3.0, 3.0);
+        let p1_line2 = doc.add_base_point("P1L2", 0.0, 4.0);
+        let p2_line2 = doc.add_base_point("P2L2", 4.0, 0.0);
+        let result = doc
+            .add_line_intersect("X", p1_line1, p2_line1, p1_line2, p2_line2)
+            .unwrap();
+
+        // p2_line2 is the FOURTH id in the signature, proving every one of
+        // the four references (not just the first) is actually tracked.
+        let err = doc.remove_tool(p2_line2).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: p2_line2,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(p2_line2)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn remove_tool_blocked_by_a_point_of_intersections_dependency() {
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 3.0, 7.0);
+        let p2 = doc.add_base_point("P2", 9.0, -2.0);
+        let result = doc.add_point_of_intersection("X", p1, p2).unwrap();
+
+        let err = doc.remove_tool(p2).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: p2,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(p2)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn remove_tool_blocked_by_a_triangles_dependency() {
+        let mut doc = Document::default();
+        let axis_p1 = doc.add_base_point("AxisP1", 0.0, 0.0);
+        let axis_p2 = doc.add_base_point("AxisP2", 20.0, 0.0);
+        let hyp_p1 = doc.add_base_point("HypP1", 8.0, -3.0);
+        let hyp_p2 = doc.add_base_point("HypP2", 14.0, 9.0);
+        let result = doc
+            .add_triangle("T", axis_p1, axis_p2, hyp_p1, hyp_p2)
+            .unwrap();
+
+        // hyp_p2 is the FOURTH id in the signature, proving every one of
+        // the four references is actually tracked.
+        let err = doc.remove_tool(hyp_p2).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: hyp_p2,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(hyp_p2)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn remove_tool_blocked_by_a_point_of_contacts_dependency() {
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 5.0, 3.0);
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p2 = doc.add_base_point("P2", 10.0, 0.0);
+        let result = doc.add_point_of_contact("X", center, p1, p2, "4").unwrap();
+
+        let err = doc.remove_tool(center).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: center,
+                used_by: result
+            }
+        );
+        assert!(doc.contains(center)); // the failed removal changed nothing
     }
 }

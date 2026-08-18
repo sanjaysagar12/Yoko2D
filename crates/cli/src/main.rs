@@ -248,6 +248,61 @@ fn describe_tool(kind: &core_lib::ToolKind) -> String {
             "nodes={}, seam_allowance={seam_allowance_formula:?}", // just the node count here: individual node points aren't this summary's focus
             nodes.len() // how many boundary vertices this piece has
         ),
+        core_lib::ToolKind::ShoulderPoint {
+            p1_line,
+            p2_line,
+            shoulder,
+            length_formula,
+            ..
+        } => format!(
+            "p1_line={}, p2_line={}, shoulder={}, length={length_formula:?}",
+            p1_line.raw(),  // the ray's own starting point
+            p2_line.raw(),  // the point defining the ray's direction
+            shoulder.raw()  // the circle's center
+        ),
+        core_lib::ToolKind::LineIntersect {
+            p1_line1,
+            p2_line1,
+            p1_line2,
+            p2_line2,
+            ..
+        } => format!(
+            "p1_line1={}, p2_line1={}, p1_line2={}, p2_line2={}", // no formula fields: LineIntersect is pure geometry
+            p1_line1.raw(), // the first line's first defining point
+            p2_line1.raw(), // the first line's second defining point
+            p1_line2.raw(), // the second line's first defining point
+            p2_line2.raw()  // the second line's second defining point
+        ),
+        core_lib::ToolKind::PointOfIntersection { p1, p2, .. } => format!(
+            "p1={}, p2={}", // no formula fields: PointOfIntersection is pure geometry
+            p1.raw(),       // the point this one takes its x coordinate from
+            p2.raw()        // the point this one takes its y coordinate from
+        ),
+        core_lib::ToolKind::Triangle {
+            axis_p1,
+            axis_p2,
+            hypotenuse_p1,
+            hypotenuse_p2,
+            ..
+        } => format!(
+            "axis_p1={}, axis_p2={}, hypotenuse_p1={}, hypotenuse_p2={}", // no formula fields: Triangle is pure geometry
+            axis_p1.raw(),       // the reference line's first defining point
+            axis_p2.raw(),       // the reference line's second defining point
+            hypotenuse_p1.raw(), // one endpoint of the segment forming the right angle
+            hypotenuse_p2.raw()  // the other endpoint of that segment
+        ),
+        core_lib::ToolKind::PointOfContact {
+            center,
+            p1,
+            p2,
+            radius_formula,
+            ..
+        } => format!(
+            "center={}, p1={}, p2={}, radius={radius_formula:?}",
+            center.raw(), // the circle's center
+            p1.raw(),     // the segment's first endpoint
+            p2.raw()      // the segment's second endpoint
+        ),
     }
 }
 

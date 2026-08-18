@@ -1,0 +1,27 @@
+{
+  "actions": [
+    { "op": "add_base_point", "name": "P1Line", "x": 0.0, "y": 0.0 },
+    { "op": "add_base_point", "name": "P2Line", "x": 10.0, "y": 0.0 },
+    { "op": "add_base_point", "name": "Shoulder", "x": 15.0, "y": 8.0 },
+    { "op": "add_shoulder_point", "name": "S", "p1_line": "P1Line", "p2_line": "P2Line", "shoulder": "Shoulder", "length_formula": "10" },
+
+    { "op": "add_base_point", "name": "Center", "x": 21.0, "y": 3.0 },
+    { "op": "add_point_of_contact", "name": "Contact", "center": "Center", "p1": "P1Line", "p2": "S", "radius_formula": "4" },
+
+    { "op": "add_base_point", "name": "LA1", "x": 0.0, "y": 0.0 },
+    { "op": "add_base_point", "name": "LA2", "x": 3.0, "y": 3.0 },
+    { "op": "add_base_point", "name": "LB1", "x": 0.0, "y": 4.0 },
+    { "op": "add_base_point", "name": "LB2", "x": 4.0, "y": 0.0 },
+    { "op": "add_line_intersect", "name": "LineX", "p1_line1": "LA1", "p2_line1": "LA2", "p1_line2": "LB1", "p2_line2": "LB2" },
+
+    { "op": "add_base_point", "name": "PXa", "x": 3.0, "y": 7.0 },
+    { "op": "add_base_point", "name": "PXb", "x": 9.0, "y": -2.0 },
+    { "op": "add_point_of_intersection", "name": "XY", "p1": "PXa", "p2": "PXb" },
+
+    { "op": "add_base_point", "name": "AxisP1", "x": 0.0, "y": 0.0 },
+    { "op": "add_base_point", "name": "AxisP2", "x": 20.0, "y": 0.0 },
+    { "op": "add_base_point", "name": "HypP1", "x": 8.0, "y": -3.0 },
+    { "op": "add_base_point", "name": "HypP2", "x": 14.0, "y": 9.0 },
+    { "op": "add_triangle", "name": "T", "axis_p1": "AxisP1", "axis_p2": "AxisP2", "hypotenuse_p1": "HypP1", "hypotenuse_p2": "HypP2" }
+  ]
+}

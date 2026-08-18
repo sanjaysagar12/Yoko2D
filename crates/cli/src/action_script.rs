@@ -127,6 +127,54 @@ pub enum Action {
         angle_formula: Option<String>, // new angle formula string; `None` keeps the current formula
         length_formula: Option<String>, // new length formula string; `None` keeps the current formula
     },
+
+    /// Maps to `Document::add_shoulder_point(name, p1_line, p2_line, shoulder, length_formula)`.
+    #[serde(rename = "add_shoulder_point")]
+    AddShoulderPoint {
+        name: String,           // -> add_shoulder_point's `name` parameter
+        p1_line: String, // the NAME of an earlier point; resolved to add_shoulder_point's `p1_line` parameter
+        p2_line: String, // the NAME of an earlier point; resolved to add_shoulder_point's `p2_line` parameter
+        shoulder: String, // the NAME of an earlier point; resolved to add_shoulder_point's `shoulder` parameter
+        length_formula: String, // -> add_shoulder_point's `length_formula` parameter
+    },
+
+    /// Maps to `Document::add_line_intersect(name, p1_line1, p2_line1, p1_line2, p2_line2)`.
+    #[serde(rename = "add_line_intersect")]
+    AddLineIntersect {
+        name: String,     // -> add_line_intersect's `name` parameter
+        p1_line1: String, // the NAME of an earlier point; resolved to add_line_intersect's `p1_line1` parameter
+        p2_line1: String, // the NAME of an earlier point; resolved to add_line_intersect's `p2_line1` parameter
+        p1_line2: String, // the NAME of an earlier point; resolved to add_line_intersect's `p1_line2` parameter
+        p2_line2: String, // the NAME of an earlier point; resolved to add_line_intersect's `p2_line2` parameter
+    },
+
+    /// Maps to `Document::add_point_of_intersection(name, p1, p2)`.
+    #[serde(rename = "add_point_of_intersection")]
+    AddPointOfIntersection {
+        name: String, // -> add_point_of_intersection's `name` parameter
+        p1: String, // the NAME of an earlier point; resolved to add_point_of_intersection's `p1` parameter
+        p2: String, // the NAME of an earlier point; resolved to add_point_of_intersection's `p2` parameter
+    },
+
+    /// Maps to `Document::add_triangle(name, axis_p1, axis_p2, hypotenuse_p1, hypotenuse_p2)`.
+    #[serde(rename = "add_triangle")]
+    AddTriangle {
+        name: String,          // -> add_triangle's `name` parameter
+        axis_p1: String, // the NAME of an earlier point; resolved to add_triangle's `axis_p1` parameter
+        axis_p2: String, // the NAME of an earlier point; resolved to add_triangle's `axis_p2` parameter
+        hypotenuse_p1: String, // the NAME of an earlier point; resolved to add_triangle's `hypotenuse_p1` parameter
+        hypotenuse_p2: String, // the NAME of an earlier point; resolved to add_triangle's `hypotenuse_p2` parameter
+    },
+
+    /// Maps to `Document::add_point_of_contact(name, center, p1, p2, radius_formula)`.
+    #[serde(rename = "add_point_of_contact")]
+    AddPointOfContact {
+        name: String,           // -> add_point_of_contact's `name` parameter
+        center: String, // the NAME of an earlier point; resolved to add_point_of_contact's `center` parameter
+        p1: String, // the NAME of an earlier point; resolved to add_point_of_contact's `p1` parameter
+        p2: String, // the NAME of an earlier point; resolved to add_point_of_contact's `p2` parameter
+        radius_formula: String, // -> add_point_of_contact's `radius_formula` parameter
+    },
 }
 
 /// The top-level shape of an action-script JSON file: an optional
@@ -251,6 +299,11 @@ pub(crate) fn tool_name(kind: &core_lib::ToolKind) -> Option<&str> {
         core_lib::ToolKind::Height { name, .. } => Some(name.as_str()),
         core_lib::ToolKind::Midpoint { name, .. } => Some(name.as_str()),
         core_lib::ToolKind::Piece { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::ShoulderPoint { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::LineIntersect { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::PointOfIntersection { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Triangle { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::PointOfContact { name, .. } => Some(name.as_str()),
         core_lib::ToolKind::Line { .. } => None, // the only variant with no user-facing name
     }
 }
@@ -271,6 +324,11 @@ pub(crate) fn tool_kind_variant_name(kind: &core_lib::ToolKind) -> &'static str 
         core_lib::ToolKind::Height { .. } => "Height",
         core_lib::ToolKind::Midpoint { .. } => "Midpoint",
         core_lib::ToolKind::Piece { .. } => "Piece",
+        core_lib::ToolKind::ShoulderPoint { .. } => "ShoulderPoint",
+        core_lib::ToolKind::LineIntersect { .. } => "LineIntersect",
+        core_lib::ToolKind::PointOfIntersection { .. } => "PointOfIntersection",
+        core_lib::ToolKind::Triangle { .. } => "Triangle",
+        core_lib::ToolKind::PointOfContact { .. } => "PointOfContact",
     }
 }
 
@@ -545,6 +603,95 @@ pub fn execute_action_script(
                         .unwrap_or_else(|| current_length_formula.clone()), // same, for the length formula
                 };
                 document.replace_tool_kind(id, new_kind)?; // propagate a Document-side validation failure via ActionScriptError::Document
+            }
+            Action::AddShoulderPoint {
+                name,
+                p1_line,
+                p2_line,
+                shoulder,
+                length_formula,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let p1_line_id = resolve_name(&names, p1_line)?; // look up the referenced point's id, or report exactly which name is missing
+                let p2_line_id = resolve_name(&names, p2_line)?; // same, for the second referenced point
+                let shoulder_id = resolve_name(&names, shoulder)?; // same, for the circle-center point
+                let id = document.add_shoulder_point(
+                    name.clone(),
+                    p1_line_id,
+                    p2_line_id,
+                    shoulder_id,
+                    length_formula.clone(),
+                )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
+            Action::AddLineIntersect {
+                name,
+                p1_line1,
+                p2_line1,
+                p1_line2,
+                p2_line2,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let p1_line1_id = resolve_name(&names, p1_line1)?; // look up the referenced point's id, or report exactly which name is missing
+                let p2_line1_id = resolve_name(&names, p2_line1)?; // same, for the first line's second point
+                let p1_line2_id = resolve_name(&names, p1_line2)?; // same, for the second line's first point
+                let p2_line2_id = resolve_name(&names, p2_line2)?; // same, for the second line's second point
+                let id = document.add_line_intersect(
+                    name.clone(),
+                    p1_line1_id,
+                    p2_line1_id,
+                    p1_line2_id,
+                    p2_line2_id,
+                )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
+            Action::AddPointOfIntersection { name, p1, p2 } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let p1_id = resolve_name(&names, p1)?; // look up the referenced point's id, or report exactly which name is missing
+                let p2_id = resolve_name(&names, p2)?; // same, for the second referenced point
+                let id = document.add_point_of_intersection(name.clone(), p1_id, p2_id)?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
+            Action::AddTriangle {
+                name,
+                axis_p1,
+                axis_p2,
+                hypotenuse_p1,
+                hypotenuse_p2,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let axis_p1_id = resolve_name(&names, axis_p1)?; // look up the referenced point's id, or report exactly which name is missing
+                let axis_p2_id = resolve_name(&names, axis_p2)?; // same, for the axis's second point
+                let hypotenuse_p1_id = resolve_name(&names, hypotenuse_p1)?; // same, for the hypotenuse's first point
+                let hypotenuse_p2_id = resolve_name(&names, hypotenuse_p2)?; // same, for the hypotenuse's second point
+                let id = document.add_triangle(
+                    name.clone(),
+                    axis_p1_id,
+                    axis_p2_id,
+                    hypotenuse_p1_id,
+                    hypotenuse_p2_id,
+                )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
+            Action::AddPointOfContact {
+                name,
+                center,
+                p1,
+                p2,
+                radius_formula,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let center_id = resolve_name(&names, center)?; // look up the referenced point's id, or report exactly which name is missing
+                let p1_id = resolve_name(&names, p1)?; // same, for the segment's first endpoint
+                let p2_id = resolve_name(&names, p2)?; // same, for the segment's second endpoint
+                let id = document.add_point_of_contact(
+                    name.clone(),
+                    center_id,
+                    p1_id,
+                    p2_id,
+                    radius_formula.clone(),
+                )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
             }
         }
     }
@@ -1030,5 +1177,258 @@ mod tests {
             }); // either endpoint order counts as the same edge
             assert!(found, "missing edge {expected_p1:?}-{expected_p2:?}");
         }
+    }
+
+    // Part C end-to-end tests: one per newly added tool, confirming the
+    // new Action variant, invoked from an action script referencing
+    // earlier points by name, produces correct geometry — same golden
+    // values as recompute.rs's own Part C tests, exercised through this
+    // layer instead.
+
+    #[test]
+    fn add_shoulder_point_action_produces_correct_geometry() {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "P1Line".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "P2Line".to_string(),
+                    x: 10.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "Shoulder".to_string(),
+                    x: 15.0,
+                    y: 8.0,
+                },
+                Action::AddShoulderPoint {
+                    name: "S".to_string(),
+                    p1_line: "P1Line".to_string(),
+                    p2_line: "P2Line".to_string(),
+                    shoulder: "Shoulder".to_string(),
+                    length_formula: "10".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let s_id = document
+            .history()
+            .iter()
+            .find(|r| tool_name(&r.kind) == Some("S"))
+            .unwrap()
+            .id;
+        let point = data.get_point(s_id).unwrap();
+        assert!((point.x - 21.0).abs() < 1e-9); // same hand-calculated value as recompute.rs's own ShoulderPoint golden test
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_line_intersect_action_produces_correct_geometry() {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "P1L1".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "P2L1".to_string(),
+                    x: 3.0,
+                    y: 3.0,
+                },
+                Action::AddBasePoint {
+                    name: "P1L2".to_string(),
+                    x: 0.0,
+                    y: 4.0,
+                },
+                Action::AddBasePoint {
+                    name: "P2L2".to_string(),
+                    x: 4.0,
+                    y: 0.0,
+                },
+                Action::AddLineIntersect {
+                    name: "X".to_string(),
+                    p1_line1: "P1L1".to_string(),
+                    p2_line1: "P2L1".to_string(),
+                    p1_line2: "P1L2".to_string(),
+                    p2_line2: "P2L2".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let x_id = document
+            .history()
+            .iter()
+            .find(|r| tool_name(&r.kind) == Some("X"))
+            .unwrap()
+            .id;
+        let point = data.get_point(x_id).unwrap();
+        assert!((point.x - 2.0).abs() < 1e-9); // same hand-calculated value as recompute.rs's own LineIntersect golden test
+        assert!((point.y - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_point_of_intersection_action_produces_correct_geometry() {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "P1".to_string(),
+                    x: 3.0,
+                    y: 7.0,
+                },
+                Action::AddBasePoint {
+                    name: "P2".to_string(),
+                    x: 9.0,
+                    y: -2.0,
+                },
+                Action::AddPointOfIntersection {
+                    name: "X".to_string(),
+                    p1: "P1".to_string(),
+                    p2: "P2".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let x_id = document
+            .history()
+            .iter()
+            .find(|r| tool_name(&r.kind) == Some("X"))
+            .unwrap()
+            .id;
+        let point = data.get_point(x_id).unwrap();
+        assert!((point.x - 3.0).abs() < 1e-9); // P1's x
+        assert!((point.y - -2.0).abs() < 1e-9); // P2's y
+    }
+
+    #[test]
+    fn add_triangle_action_produces_correct_geometry() {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "AxisP1".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "AxisP2".to_string(),
+                    x: 20.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "HypP1".to_string(),
+                    x: 8.0,
+                    y: -3.0,
+                },
+                Action::AddBasePoint {
+                    name: "HypP2".to_string(),
+                    x: 14.0,
+                    y: 9.0,
+                },
+                Action::AddTriangle {
+                    name: "T".to_string(),
+                    axis_p1: "AxisP1".to_string(),
+                    axis_p2: "AxisP2".to_string(),
+                    hypotenuse_p1: "HypP1".to_string(),
+                    hypotenuse_p2: "HypP2".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let t_id = document
+            .history()
+            .iter()
+            .find(|r| tool_name(&r.kind) == Some("T"))
+            .unwrap()
+            .id;
+        let point = data.get_point(t_id).unwrap();
+        assert!((point.x - 17.0).abs() < 1e-9); // same hand-calculated value as recompute.rs's own Triangle golden test
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    // This is the ONLY test in this module where a new tool depends on
+    // output from ANOTHER new tool, exercising named-reference resolution
+    // across two Part C actions in the same script: the ShoulderPoint
+    // result "S" becomes PointOfContact's own segment endpoint.
+    #[test]
+    fn add_point_of_contact_action_depending_on_a_shoulder_point_action_produces_correct_geometry()
+    {
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: None,
+            actions: vec![
+                Action::AddBasePoint {
+                    name: "P1Line".to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "P2Line".to_string(),
+                    x: 10.0,
+                    y: 0.0,
+                },
+                Action::AddBasePoint {
+                    name: "Shoulder".to_string(),
+                    x: 15.0,
+                    y: 8.0,
+                },
+                Action::AddShoulderPoint {
+                    name: "S".to_string(), // resolves to (21,0), per the golden test above
+                    p1_line: "P1Line".to_string(),
+                    p2_line: "P2Line".to_string(),
+                    shoulder: "Shoulder".to_string(),
+                    length_formula: "10".to_string(),
+                },
+                Action::AddBasePoint {
+                    name: "Center".to_string(),
+                    x: 21.0,
+                    y: 3.0,
+                },
+                Action::AddPointOfContact {
+                    name: "Contact".to_string(),
+                    center: "Center".to_string(),
+                    p1: "P1Line".to_string(),
+                    p2: "S".to_string(), // depends on the ShoulderPoint action's own result, by name
+                    radius_formula: "4".to_string(),
+                },
+            ],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+
+        // Center=(21,3), radius=4: circle meets y=0 at x=21+-sqrt(7)
+        // (from (x-21)^2+9=16). Segment is now [0,21] (P1Line to S), so
+        // both candidates (21-sqrt(7)~18.35 and 21+sqrt(7)~23.65) fall on
+        // opposite sides of that check: 21-sqrt(7) is on [0,21], 21+sqrt(7)
+        // is not, so exactly one qualifies.
+        let sqrt7 = 7.0_f64.sqrt();
+        let contact_id = document
+            .history()
+            .iter()
+            .find(|r| tool_name(&r.kind) == Some("Contact"))
+            .unwrap()
+            .id;
+        let point = data.get_point(contact_id).unwrap();
+        assert!((point.x - (21.0 - sqrt7)).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
     }
 }

@@ -281,6 +281,251 @@ pub fn recompute_all(doc: &Document) -> Result<PatternData, PatternError> {
                 }); // the resolved piece for this tool
                 data.insert_with_id(record.id, piece)?; // place it under this tool's assigned id
             }
+            ToolKind::ShoulderPoint {
+                p1_line,
+                p2_line,
+                shoulder,
+                length_formula,
+                ..
+            } => {
+                let point1 = resolve_point(&data, *p1_line)?; // resolve the ray's starting point
+                let point2 = resolve_point(&data, *p2_line)?; // resolve the point defining the ray's direction
+                let shoulder_point = resolve_point(&data, *shoulder)?; // resolve the circle's center
+                let vars = flatten_variables(&data); // snapshot every variable resolved so far, for this tool's formula to reference
+                let radius = eval_formula(length_formula, &vars)?; // evaluate the circle-radius formula
+                if radius <= 0.0 {
+                    // a non-positive radius has no sensible "point on the circle" answer for this tool
+                    return Err(PatternError::DegenerateGeometry(
+                        "ShoulderPoint: length must evaluate to a positive radius".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+                let dx = point2.x - point1.x; // x component of the p1_line->p2_line direction vector
+                let dy = point2.y - point1.y; // y component of the p1_line->p2_line direction vector
+                let base_length = (dx * dx + dy * dy).sqrt(); // the distance from p1_line to p2_line
+                if base_length == 0.0 {
+                    // p1_line and p2_line coincide: there is no ray to intersect the circle with
+                    return Err(PatternError::DegenerateGeometry(
+                        "ShoulderPoint: p1_line and p2_line are coincident".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+                let dir_x = dx / base_length; // normalized ray direction, x component
+                let dir_y = dy / base_length; // normalized ray direction, y component
+                let candidates = crate::geometry::line_circle_intersection(
+                    (point1.x, point1.y),
+                    (dir_x, dir_y),
+                    (shoulder_point.x, shoulder_point.y),
+                    radius,
+                ); // 0, 1, or 2 points where the ray's infinite line crosses the circle
+                   // Mirrors VToolShoulderPoint::FindPoint's own selection: among the
+                   // circle-line intersection candidates (checked in the same order
+                   // LineIntersectCircle itself returns them), pick the first one that
+                   // lies FARTHER than base_length from p1_line, in the ray's own
+                   // forward direction — i.e. genuinely past p2_line, not behind it.
+                let chosen = candidates.into_iter().find(|&(cx, cy)| {
+                    let forward = (cx - point1.x) * dir_x + (cy - point1.y) * dir_y; // signed distance from p1_line along the ray direction
+                    forward > base_length // strictly farther along the ray than p2_line itself
+                });
+                let Some((x, y)) = chosen else {
+                    // Deliberate deviation from Seamly2D, which silently falls back to
+                    // p2_line's own position in this case rather than reporting a
+                    // failure — this codebase always reports an ill-defined
+                    // configuration as a typed error instead of substituting a
+                    // plausible-looking but wrong value.
+                    return Err(PatternError::DegenerateGeometry(
+                        "ShoulderPoint: the circle does not reach far enough along the ray past p2_line".to_string(),
+                    ));
+                };
+                let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
+                data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
+            ToolKind::LineIntersect {
+                p1_line1,
+                p2_line1,
+                p1_line2,
+                p2_line2,
+                ..
+            } => {
+                let a1 = resolve_point(&data, *p1_line1)?; // resolve the first line's first defining point
+                let a2 = resolve_point(&data, *p2_line1)?; // resolve the first line's second defining point
+                let b1 = resolve_point(&data, *p1_line2)?; // resolve the second line's first defining point
+                let b2 = resolve_point(&data, *p2_line2)?; // resolve the second line's second defining point
+                let d1 = (a2.x - a1.x, a2.y - a1.y); // the first line's direction vector
+                let d2 = (b2.x - b1.x, b2.y - b1.y); // the second line's direction vector
+                let (x, y) =
+                    crate::geometry::line_intersection((a1.x, a1.y), d1, (b1.x, b1.y), d2)?; // propagate a parallel/collinear failure via ? (also covers a coincident-point degenerate direction, since that yields a zero cross-product too)
+                let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
+                data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
+            ToolKind::PointOfIntersection { p1, p2, .. } => {
+                let point1 = resolve_point(&data, *p1)?; // resolve the point this one takes its x coordinate from
+                let point2 = resolve_point(&data, *p2)?; // resolve the point this one takes its y coordinate from
+                                                         // no formula fields, and no degenerate case possible: combining any two points' x/y coordinates (even the same point twice) is always well-defined
+                let point = GeoObject::Point(PointData {
+                    x: point1.x, // literally p1's x coordinate
+                    y: point2.y, // literally p2's y coordinate
+                });
+                data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
+            ToolKind::Triangle {
+                axis_p1,
+                axis_p2,
+                hypotenuse_p1,
+                hypotenuse_p2,
+                ..
+            } => {
+                let ap1 = resolve_point(&data, *axis_p1)?; // resolve the reference line's first defining point
+                let ap2 = resolve_point(&data, *axis_p2)?; // resolve the reference line's second defining point
+                let hp1 = resolve_point(&data, *hypotenuse_p1)?; // resolve one endpoint of the segment forming the right angle
+                let hp2 = resolve_point(&data, *hypotenuse_p2)?; // resolve the other endpoint of that segment
+
+                let axis_dx = ap2.x - ap1.x; // x component of the axis_p1->axis_p2 direction vector
+                let axis_dy = ap2.y - ap1.y; // y component of the axis_p1->axis_p2 direction vector
+                let axis_len = (axis_dx * axis_dx + axis_dy * axis_dy).sqrt(); // the axis line's own length
+                if axis_len == 0.0 {
+                    // axis_p1 and axis_p2 coincide: there is no reference line at all
+                    return Err(PatternError::DegenerateGeometry(
+                        "Triangle: axis_p1 and axis_p2 are coincident".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+
+                let hyp_dx = hp2.x - hp1.x; // x component of the hypotenuse_p1->hypotenuse_p2 direction vector
+                let hyp_dy = hp2.y - hp1.y; // y component of the hypotenuse_p1->hypotenuse_p2 direction vector
+                let hyp_len = (hyp_dx * hyp_dx + hyp_dy * hyp_dy).sqrt(); // the hypotenuse segment's own length
+                if hyp_len == 0.0 {
+                    // hypotenuse_p1 and hypotenuse_p2 coincide: there is no segment to form a right angle with
+                    return Err(PatternError::DegenerateGeometry(
+                        "Triangle: hypotenuse_p1 and hypotenuse_p2 are coincident".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+
+                let cross = axis_dx * hyp_dy - axis_dy * hyp_dx; // the 2D cross product of the two directions; zero exactly when they're parallel
+                if cross.abs() < 1e-9 {
+                    // the axis and the hypotenuse never cross at a unique point, so there's no startPoint to search forward from
+                    return Err(PatternError::DegenerateGeometry(
+                        "Triangle: axis and hypotenuse are parallel".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+
+                let (start_x, start_y) = crate::geometry::line_intersection(
+                    (ap1.x, ap1.y),
+                    (axis_dx, axis_dy),
+                    (hp1.x, hp1.y),
+                    (hyp_dx, hyp_dy),
+                )?; // where the axis crosses the hypotenuse; propagate the (already-guarded-against-above) parallel failure via ? defensively
+
+                // Seamly2D's VToolTriangle::FindPoint numerically searches
+                // outward from `startPoint` along the axis, 1 pixel at a
+                // time, for the first point where the law-of-cosines angle
+                // at that point (opposite the fixed hypotenuse length) drops
+                // to <=90 degrees — by Thales' theorem, that condition holds
+                // exactly on the circle whose diameter is the hypotenuse
+                // segment, so this computes that crossing directly instead
+                // of searching for it.
+                let center_x = (hp1.x + hp2.x) / 2.0; // the Thales circle's center: the hypotenuse segment's own midpoint
+                let center_y = (hp1.y + hp2.y) / 2.0;
+                let radius = hyp_len / 2.0; // the Thales circle's radius: half the hypotenuse segment's length
+
+                let axis_unit = (axis_dx / axis_len, axis_dy / axis_len); // normalized axis direction, for the circle-intersection helper
+                let candidates = crate::geometry::line_circle_intersection(
+                    (ap1.x, ap1.y),
+                    axis_unit,
+                    (center_x, center_y),
+                    radius,
+                ); // 0, 1, or 2 points where the axis crosses the Thales circle
+
+                // Seamly2D's search only ever steps FORWARD from startPoint
+                // (in the axis_p1->axis_p2 direction), so among the circle
+                // candidates, pick whichever one lies strictly ahead of
+                // startPoint in that same direction.
+                let chosen = candidates.into_iter().find(|&(cx, cy)| {
+                    let forward = (cx - start_x) * axis_dx + (cy - start_y) * axis_dy; // signed projection of (candidate - startPoint) onto the (non-unit, but sign-preserving) axis direction
+                    forward > 1e-9
+                });
+                let Some((x, y)) = chosen else {
+                    // Seamly2D's own numeric search has no bound on this
+                    // case (it would loop forever rather than terminate) —
+                    // reported here as a typed error instead.
+                    return Err(PatternError::DegenerateGeometry(
+                        "Triangle: axis never reaches the right-angle point in the forward direction".to_string(),
+                    ));
+                };
+                let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
+                data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
+            ToolKind::PointOfContact {
+                center,
+                p1,
+                p2,
+                radius_formula,
+                ..
+            } => {
+                let center_point = resolve_point(&data, *center)?; // resolve the circle's center
+                let point1 = resolve_point(&data, *p1)?; // resolve the segment's first endpoint
+                let point2 = resolve_point(&data, *p2)?; // resolve the segment's second endpoint
+                let vars = flatten_variables(&data); // snapshot every variable resolved so far, for this tool's formula to reference
+                let radius = eval_formula(radius_formula, &vars)?; // evaluate the circle-radius formula
+                if radius < 0.0 {
+                    // a negative radius has no sensible geometric meaning for a circle
+                    return Err(PatternError::DegenerateGeometry(
+                        "PointOfContact: radius must evaluate to a non-negative value".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+                let dx = point2.x - point1.x; // x component of the p1->p2 direction vector
+                let dy = point2.y - point1.y; // y component of the p1->p2 direction vector
+                let seg_len = (dx * dx + dy * dy).sqrt(); // the segment's own length
+                if seg_len == 0.0 {
+                    // p1 and p2 coincide: there is no segment for the circle to cross
+                    return Err(PatternError::DegenerateGeometry(
+                        "PointOfContact: p1 and p2 are coincident".to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+                let unit = (dx / seg_len, dy / seg_len); // normalized p1->p2 direction, for the circle-intersection helper
+                let candidates = crate::geometry::line_circle_intersection(
+                    (point1.x, point1.y),
+                    unit,
+                    (center_point.x, center_point.y),
+                    radius,
+                ); // 0, 1, or 2 points where the circle crosses the infinite line through p1/p2
+                if candidates.is_empty() {
+                    // the circle never reaches the line at all
+                    return Err(PatternError::DegenerateGeometry(
+                        "PointOfContact: the circle does not intersect the line through p1 and p2"
+                            .to_string(), // names exactly which geometric configuration failed
+                    ));
+                }
+                let (x, y) = if candidates.len() == 1 {
+                    candidates[0] // tangent: only one candidate exists at all
+                } else {
+                    // Mirrors VToolPointOfContact::FindPoint's own
+                    // disambiguation: prefer whichever candidate actually
+                    // lies within the finite segment [p1, p2] (not just
+                    // somewhere on the infinite line through it); if both
+                    // or neither qualify, prefer whichever is closer to p1.
+                    let param = |candidate: (f64, f64)| {
+                        (candidate.0 - point1.x) * unit.0 + (candidate.1 - point1.y) * unit.1
+                        // signed distance from p1 along the p1->p2 direction; since `candidate` is already known to lie on this exact line, this equals its true Euclidean distance from p1 whenever it's positive
+                    };
+                    let on_segment = |t: f64| (-1e-9..=seg_len + 1e-9).contains(&t); // within [0, seg_len], with a small tolerance for float error at the endpoints
+                    let t0 = param(candidates[0]);
+                    let t1 = param(candidates[1]);
+                    let on0 = on_segment(t0);
+                    let on1 = on_segment(t1);
+                    if on0 == on1 {
+                        // both candidates are on the segment, or neither is: fall back to whichever is closer to p1
+                        if t0.abs() <= t1.abs() {
+                            candidates[0]
+                        } else {
+                            candidates[1]
+                        }
+                    } else if on0 {
+                        candidates[0] // exactly one candidate is truly on the segment: prefer it
+                    } else {
+                        candidates[1]
+                    }
+                };
+                let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
+                data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
         }
     }
 
@@ -641,5 +886,493 @@ mod tests {
             .unwrap();
 
         assert_ne!(sa_before, sa_after);
+    }
+
+    // ===================================================================
+    // Part B: hand-verified parity checks against Seamly2D's actual C++
+    // source, for the six tools this project already implements. Each
+    // test's comment shows the hand calculation performed against the
+    // cited Seamly2D function, independently of this crate's own
+    // implementation.
+    // ===================================================================
+
+    #[test]
+    fn along_line_parity_extrapolates_and_shortens_like_qlinef_setlength() {
+        // Seamly2D: VToolAlongLine::Create builds `QLineF line(p1, p2);
+        // line.setLength(result);` — Qt's QLineF::setLength keeps the
+        // line's existing ANGLE (the p1->p2 direction) and simply rescales
+        // p2 to the new length; it never clamps to the original p1-p2
+        // distance, so a length longer than the original extrapolates past
+        // p2, and a length shorter lands short of it.
+        //
+        // p1=(2,3), p2=(6,6): dx=4, dy=3, distance=5, unit direction=(0.8,0.6).
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 2.0, 3.0);
+        let p2 = doc.add_base_point("P2", 6.0, 6.0);
+
+        // length=20, LONGER than the original 5-unit p1-p2 distance:
+        // hand-calculated (2,3) + 20*(0.8,0.6) = (2+16, 3+12) = (18,15).
+        let longer = doc.add_along_line("Longer", p1, p2, "20").unwrap();
+        // length=2, SHORTER than the original 5-unit distance:
+        // hand-calculated (2,3) + 2*(0.8,0.6) = (2+1.6, 3+1.2) = (3.6,4.2).
+        let shorter = doc.add_along_line("Shorter", p1, p2, "2").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let longer_point = data.get_point(longer).unwrap();
+        assert!((longer_point.x - 18.0).abs() < 1e-9);
+        assert!((longer_point.y - 15.0).abs() < 1e-9);
+        let shorter_point = data.get_point(shorter).unwrap();
+        assert!((shorter_point.x - 3.6).abs() < 1e-9);
+        assert!((shorter_point.y - 4.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn normal_parity_matches_qlinef_normalvector_convention() {
+        // Seamly2D: VToolNormal::FindPoint does
+        // `QLineF normal = line.normalVector(); normal.setAngle(normal.angle()+angle);
+        // normal.setLength(length); return normal.p2();` where
+        // `line = QLineF(firstPoint, secondPoint)`.
+        //
+        // Qt's own docs: QLineF::normalVector() "Returns a line that is
+        // perpendicular to this line, with the same starting point and
+        // length, obtained by rotating this line 90 degrees counterclockwise";
+        // QLineF::angle()/setAngle() work in Qt's own SCREEN-Y-DOWN raw
+        // coordinates via `atan2(-dy, dx)` (a deliberate negation Qt applies
+        // specifically so its angle values already read as a conventional,
+        // "up is positive" measure despite the underlying y-down pixels).
+        // Converting that 90-degree-CCW rotation into THIS crate's plain
+        // y-up (x,y) convention (Yoko2D never negates y until camera.rs's
+        // final screen-paint step) shows it lands on the SAME 90-degree
+        // counter-clockwise rotation Yoko2D's own Normal arm already uses
+        // (perp_x=-dir_y, perp_y=dir_x) — Qt's angle-based construction and
+        // Yoko2D's plain trig turn out to agree exactly, with no extra sign
+        // flip needed anywhere in the chain.
+        //
+        // Chosen test case: firstPoint=(0,0), secondPoint=(10,0), angle=0,
+        // length=5 — deliberately asymmetric (a sign error here would flip
+        // the result to (0,-5) instead of the correct (0,5), a clearly
+        // different, visibly mirrored point).
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p2 = doc.add_base_point("P2", 10.0, 0.0);
+        let normal = doc.add_normal("N", p1, p2, "5", "0").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(normal).unwrap();
+        assert!((point.x - 0.0).abs() < 1e-9);
+        assert!((point.y - 5.0).abs() < 1e-9); // NOT -5.0: confirms the rotation direction matches Seamly2D's actual behavior
+    }
+
+    /// Independently verifies that `candidate` truly bisects the angle
+    /// p1-p2-p3 (p2 the vertex) at the given `length` from p2, WITHOUT
+    /// relying on either Seamly2D's QLineF-angle formula or this crate's
+    /// own vector-sum implementation: checks the definition directly — the
+    /// angle between (p1-p2) and (candidate-p2) equals the angle between
+    /// (candidate-p2) and (p3-p2), via the dot-product angle-between-vectors
+    /// formula, and that `candidate` is exactly `length` from p2.
+    fn assert_is_a_true_angle_bisector(
+        p1: (f64, f64),
+        p2: (f64, f64),
+        p3: (f64, f64),
+        length: f64,
+        candidate: (f64, f64),
+    ) {
+        let angle_between = |a: (f64, f64), b: (f64, f64)| {
+            let dot = a.0 * b.0 + a.1 * b.1; // dot product
+            let len_a = (a.0 * a.0 + a.1 * a.1).sqrt();
+            let len_b = (b.0 * b.0 + b.1 * b.1).sqrt();
+            (dot / (len_a * len_b)).clamp(-1.0, 1.0).acos() // the angle between the two vectors, in radians
+        };
+        let to_p1 = (p1.0 - p2.0, p1.1 - p2.1);
+        let to_p3 = (p3.0 - p2.0, p3.1 - p2.1);
+        let to_candidate = (candidate.0 - p2.0, candidate.1 - p2.1);
+
+        let angle_to_p1 = angle_between(to_p1, to_candidate);
+        let angle_to_p3 = angle_between(to_candidate, to_p3);
+        assert!(
+            (angle_to_p1 - angle_to_p3).abs() < 1e-9,
+            "not a true bisector: angle to p1 = {angle_to_p1}, angle to p3 = {angle_to_p3}"
+        );
+
+        let candidate_distance =
+            ((candidate.0 - p2.0).powi(2) + (candidate.1 - p2.1).powi(2)).sqrt();
+        assert!((candidate_distance - length).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bisector_parity_matches_seamly2ds_selected_bisector_across_angle_ranges() {
+        // Seamly2D: VToolBisector::BisectorAngle computes the true angle
+        // bisector via QLineF::angleTo with explicit reflex-angle (>180
+        // degrees) handling, always landing on the INTERIOR (<=180 degree)
+        // bisector between the two rays. Yoko2D's own Bisector arm instead
+        // normalizes and sums the two ray direction vectors. Rather than
+        // re-deriving Seamly2D's own trig formula (which would just prove
+        // the two formulas are algebraically equal, not that the actual
+        // CODE behaves correctly), this verifies Yoko2D's real output
+        // satisfies the bisector's actual geometric DEFINITION directly, at
+        // a right angle (~90 degrees), a very acute angle (~20 degrees),
+        // and a very obtuse angle (~160 degrees) between the two rays.
+        let mut doc = Document::default();
+        let p2 = doc.add_base_point("P2", 0.0, 0.0); // shared vertex for every case below
+        let p1 = doc.add_base_point("P1", 10.0, 0.0); // ray at angle 0 degrees, shared by every case
+
+        // ~90 degrees: p3 at angle 90.
+        let p3_right = doc.add_base_point("P3Right", 0.0, 10.0);
+        let bisector_right = doc.add_bisector("BRight", p1, p2, p3_right, "10").unwrap();
+
+        // ~20 degrees: p3 at angle 20.
+        let angle20 = 20.0_f64.to_radians();
+        let p3_acute = doc.add_base_point("P3Acute", 10.0 * angle20.cos(), 10.0 * angle20.sin());
+        let bisector_acute = doc.add_bisector("BAcute", p1, p2, p3_acute, "10").unwrap();
+
+        // ~160 degrees: p3 at angle 160.
+        let angle160 = 160.0_f64.to_radians();
+        let p3_obtuse =
+            doc.add_base_point("P3Obtuse", 10.0 * angle160.cos(), 10.0 * angle160.sin());
+        let bisector_obtuse = doc
+            .add_bisector("BObtuse", p1, p2, p3_obtuse, "10")
+            .unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+
+        let right_point = data.get_point(bisector_right).unwrap();
+        assert_is_a_true_angle_bisector(
+            (10.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 10.0),
+            10.0,
+            (right_point.x, right_point.y),
+        );
+
+        let acute_point = data.get_point(bisector_acute).unwrap();
+        assert_is_a_true_angle_bisector(
+            (10.0, 0.0),
+            (0.0, 0.0),
+            (10.0 * angle20.cos(), 10.0 * angle20.sin()),
+            10.0,
+            (acute_point.x, acute_point.y),
+        );
+
+        let obtuse_point = data.get_point(bisector_obtuse).unwrap();
+        assert_is_a_true_angle_bisector(
+            (10.0, 0.0),
+            (0.0, 0.0),
+            (10.0 * angle160.cos(), 10.0 * angle160.sin()),
+            10.0,
+            (obtuse_point.x, obtuse_point.y),
+        );
+    }
+
+    #[test]
+    fn height_parity_never_clamps_to_the_line_segment() {
+        // Seamly2D: VToolHeight::FindPoint calls VGObject::ClosestPoint,
+        // which builds the actual perpendicular line through `point` and
+        // intersects it with `line` via `line.intersects(lin, &p)`,
+        // returning `p` whether Qt classifies the intersection as
+        // BoundedIntersection OR UnboundedIntersection — i.e. the
+        // projected foot is never clamped to fall between line_p1/line_p2;
+        // it can land anywhere on the INFINITE line through them.
+        //
+        // Line through (0,0) and (4,3): a 3-4-5 triangle, direction
+        // (0.8,0.6), segment length 5. Target point (20,0), far off the
+        // line. Hand-calculated: t = (20-0)*0.8 + (0-0)*0.6 = 16, which is
+        // far beyond the 5-unit segment; foot = (0,0) + 16*(0.8,0.6) =
+        // (12.8, 9.6) — well past line_p2, confirming no clamping.
+        let mut doc = Document::default();
+        let line_p1 = doc.add_base_point("L1", 0.0, 0.0);
+        let line_p2 = doc.add_base_point("L2", 4.0, 3.0);
+        let off_line = doc.add_base_point("P", 20.0, 0.0);
+        let height = doc.add_height("H", off_line, line_p1, line_p2).unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(height).unwrap();
+        assert!((point.x - 12.8).abs() < 1e-9);
+        assert!((point.y - 9.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn midpoint_parity_matches_along_line_at_half_the_distance() {
+        // Seamly2D has no single dedicated "midpoint" tool function —
+        // searching src/libs/vtools for "Midpoint" finds only
+        // VToolMidpoint-adjacent naming that itself reduces to the same
+        // AlongLine-at-50%-length construction Seamly2D's own UI exposes
+        // (an AlongLine tool with its length formula set to half the
+        // segment's own length). This is therefore a consistency check
+        // between Yoko2D's own two implementations, not a Seamly2D source
+        // citation: Midpoint(p1,p2) must equal AlongLine(p1,p2,dist/2).
+        //
+        // p1=(1,2), p2=(7,10): dx=6, dy=8, distance=10, half=5.
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 1.0, 2.0);
+        let p2 = doc.add_base_point("P2", 7.0, 10.0);
+        let midpoint = doc.add_midpoint("M", p1, p2).unwrap();
+        let along = doc.add_along_line("AL", p1, p2, "5").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let midpoint_resolved = data.get_point(midpoint).unwrap();
+        let along_resolved = data.get_point(along).unwrap();
+        assert!((midpoint_resolved.x - along_resolved.x).abs() < 1e-9);
+        assert!((midpoint_resolved.y - along_resolved.y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn piece_seam_allowance_parity_matches_ekvpoint_for_a_simple_convex_triangle() {
+        use crate::document::PieceNode;
+
+        // Seamly2D: VAbstractPiece::EkvPoint's full miter-join algorithm has
+        // many branches (darts, acute/obtuse special cases, a hard-coded
+        // miter-limit constant `maxL = 2.4` that bevels corners whose miter
+        // point would otherwise land farther than `width*maxL` from the
+        // original vertex) — but its own `AngleByLength` function shows
+        // that whenever the miter point's distance from the original vertex
+        // is <= width*maxL (an ordinary, non-extreme convex corner), EkvPoint
+        // returns EXACTLY the plain intersection of the two offset edges
+        // (its own `CrosPoint`), with no further adjustment — the same
+        // value Yoko2D's own (documented-simplified) `offset_polygon`
+        // always computes for every corner. An equilateral triangle (all
+        // 60-degree corners) with width=1 keeps every corner's miter
+        // distance (width/sin(30 degrees) = 2.0) safely under maxL=2.4, so
+        // this is exactly the "ordinary corner" case EkvPoint's own code
+        // reduces to plain-intersection for, not one of its documented
+        // special-case simplifications.
+        //
+        // A=(0,0), B=(10,0), C=(5, 5*sqrt(3)): an equilateral triangle,
+        // counter-clockwise. Offsetting each edge outward by 1.0 and
+        // intersecting the offset lines by hand (same method
+        // offset_polygon itself uses) gives exactly:
+        // A' = (-sqrt(3), -1), B' = (10+sqrt(3), -1), C' = (5, 2+5*sqrt(3)).
+        let sqrt3 = 3.0_f64.sqrt();
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 10.0, 0.0);
+        let c = doc.add_base_point("C", 5.0, 5.0 * sqrt3);
+        let piece = doc
+            .add_piece(
+                "Piece1",
+                vec![
+                    PieceNode {
+                        point: a,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: b,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: c,
+                        excluded_from_seam_allowance: false,
+                    },
+                ],
+                "1.0",
+            )
+            .unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let resolved = data.get_piece(piece).unwrap();
+        let seam_allowance = resolved.seam_allowance.as_ref().unwrap();
+
+        let expected = [
+            (-sqrt3, -1.0),
+            (10.0 + sqrt3, -1.0),
+            (5.0, 2.0 + 5.0 * sqrt3),
+        ];
+        assert_eq!(seam_allowance.len(), expected.len());
+        for (got, want) in seam_allowance.iter().zip(expected.iter()) {
+            assert!((got.0 - want.0).abs() < 1e-9);
+            assert!((got.1 - want.1).abs() < 1e-9);
+        }
+    }
+
+    // ===================================================================
+    // Part C: golden and degenerate-input tests for the five newly added
+    // tools (ShoulderPoint, LineIntersect, PointOfIntersection, Triangle,
+    // PointOfContact).
+    // ===================================================================
+
+    #[test]
+    fn shoulder_point_golden_value_matches_hand_calculated_circle_intersection() {
+        // p1_line=(0,0), p2_line=(10,0): a horizontal ray, base_length=10.
+        // shoulder=(15,8), length=10 (circle radius). Hand-calculated: the
+        // perpendicular foot of (15,8) onto the ray's line (y=0) is (15,0);
+        // distance from shoulder to that foot is 8; half-chord
+        // k=sqrt(10^2-8^2)=sqrt(36)=6; candidates are (15,0)+-6*(1,0) =
+        // (21,0) and (9,0). Only (21,0) is both farther than base_length=10
+        // from p1_line AND in the ray's forward direction, so it's selected.
+        let mut doc = Document::default();
+        let p1_line = doc.add_base_point("P1Line", 0.0, 0.0);
+        let p2_line = doc.add_base_point("P2Line", 10.0, 0.0);
+        let shoulder = doc.add_base_point("Shoulder", 15.0, 8.0);
+        let result = doc
+            .add_shoulder_point("S", p1_line, p2_line, shoulder, "10")
+            .unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(result).unwrap();
+        assert!((point.x - 21.0).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn shoulder_point_circle_too_far_from_ray_is_degenerate() {
+        let mut doc = Document::default();
+        let p1_line = doc.add_base_point("P1Line", 0.0, 0.0);
+        let p2_line = doc.add_base_point("P2Line", 10.0, 0.0);
+        let shoulder = doc.add_base_point("Shoulder", 15.0, 20.0); // far above the ray
+        doc.add_shoulder_point("S", p1_line, p2_line, shoulder, "5") // radius 5, distance to ray is 20: never reaches
+            .unwrap();
+
+        let err = recompute_all(&doc).unwrap_err();
+        assert!(matches!(err, PatternError::DegenerateGeometry(_)));
+    }
+
+    #[test]
+    fn line_intersect_golden_value_non_axis_aligned() {
+        // Line 1 through (0,0) and (3,3): the line y=x.
+        // Line 2 through (0,4) and (4,0): the line y=4-x.
+        // Hand-calculated intersection: x=4-x => x=2, y=2.
+        let mut doc = Document::default();
+        let p1_line1 = doc.add_base_point("P1L1", 0.0, 0.0);
+        let p2_line1 = doc.add_base_point("P2L1", 3.0, 3.0);
+        let p1_line2 = doc.add_base_point("P1L2", 0.0, 4.0);
+        let p2_line2 = doc.add_base_point("P2L2", 4.0, 0.0);
+        let result = doc
+            .add_line_intersect("X", p1_line1, p2_line1, p1_line2, p2_line2)
+            .unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(result).unwrap();
+        assert!((point.x - 2.0).abs() < 1e-9);
+        assert!((point.y - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_intersect_parallel_lines_are_degenerate() {
+        let mut doc = Document::default();
+        let p1_line1 = doc.add_base_point("P1L1", 0.0, 0.0);
+        let p2_line1 = doc.add_base_point("P2L1", 2.0, 2.0);
+        let p1_line2 = doc.add_base_point("P1L2", 0.0, 1.0); // same (1,1) direction as line 1, offset by 1
+        let p2_line2 = doc.add_base_point("P2L2", 2.0, 3.0);
+        doc.add_line_intersect("X", p1_line1, p2_line1, p1_line2, p2_line2)
+            .unwrap();
+
+        let err = recompute_all(&doc).unwrap_err();
+        assert!(matches!(err, PatternError::DegenerateGeometry(_)));
+    }
+
+    #[test]
+    fn point_of_intersection_golden_value_combines_x_and_y_from_each_point() {
+        // No degenerate-input test exists for this tool: combining any two
+        // points' x/y coordinates (even the same point given twice) is
+        // always well-defined — see this crate's own document.rs doc
+        // comment on ToolKind::PointOfIntersection for the same note,
+        // mirroring Midpoint's identical "no degenerate case possible"
+        // precedent elsewhere in this file.
+        let mut doc = Document::default();
+        let p1 = doc.add_base_point("P1", 3.0, 7.0);
+        let p2 = doc.add_base_point("P2", 9.0, -2.0);
+        let result = doc.add_point_of_intersection("X", p1, p2).unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(result).unwrap();
+        assert!((point.x - 3.0).abs() < 1e-9); // p1's x
+        assert!((point.y - -2.0).abs() < 1e-9); // p2's y
+    }
+
+    #[test]
+    fn triangle_golden_value_matches_hand_calculated_thales_circle_intersection() {
+        // axis: (0,0)->(20,0), the x-axis. hypotenuse: (8,-3)->(14,9).
+        // Hand-calculated: hypotenuse crosses the x-axis (axis line y=0) at
+        // startPoint=(9.5,0) (parametrize hypotenuse (8+6s,-3+12s), y=0 at
+        // s=0.25, x=8+6*0.25=9.5). Thales circle: center = hypotenuse
+        // midpoint = (11,3), radius = |hypotenuse|/2 = sqrt(6^2+12^2)/2 =
+        // sqrt(180)/2 = 3*sqrt(5). Intersecting the x-axis with that circle:
+        // foot of (11,3) onto y=0 is (11,0), distance 3 from center;
+        // k=sqrt(45-9)=6; candidates (17,0) and (5,0). Only (17,0) is
+        // forward of startPoint=(9.5,0) in the axis_p1->axis_p2 (+x)
+        // direction, so it's selected. Cross-check: distance((17,0),(8,-3))
+        // = sqrt(81+9) = sqrt(90); distance((17,0),(14,9)) = sqrt(9+81) =
+        // sqrt(90); 90+90=180 = the hypotenuse's own squared length
+        // (6*sqrt(5))^2=180 exactly, confirming a true right angle at (17,0).
+        let mut doc = Document::default();
+        let axis_p1 = doc.add_base_point("AxisP1", 0.0, 0.0);
+        let axis_p2 = doc.add_base_point("AxisP2", 20.0, 0.0);
+        let hyp_p1 = doc.add_base_point("HypP1", 8.0, -3.0);
+        let hyp_p2 = doc.add_base_point("HypP2", 14.0, 9.0);
+        let result = doc
+            .add_triangle("T", axis_p1, axis_p2, hyp_p1, hyp_p2)
+            .unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(result).unwrap();
+        assert!((point.x - 17.0).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn triangle_parallel_axis_and_hypotenuse_are_degenerate() {
+        let mut doc = Document::default();
+        let axis_p1 = doc.add_base_point("AxisP1", 0.0, 0.0);
+        let axis_p2 = doc.add_base_point("AxisP2", 20.0, 0.0); // horizontal axis
+        let hyp_p1 = doc.add_base_point("HypP1", 0.0, 5.0);
+        let hyp_p2 = doc.add_base_point("HypP2", 10.0, 5.0); // also horizontal: parallel to the axis
+        doc.add_triangle("T", axis_p1, axis_p2, hyp_p1, hyp_p2)
+            .unwrap();
+
+        let err = recompute_all(&doc).unwrap_err();
+        assert!(matches!(err, PatternError::DegenerateGeometry(_)));
+    }
+
+    #[test]
+    fn point_of_contact_golden_value_ambiguous_case_prefers_closer_to_p1() {
+        // center=(5,3), radius=4, p1=(0,0), p2=(10,0): circle meets y=0 at
+        // x=5+-sqrt(7) (from (x-5)^2+9=16 => (x-5)^2=7). Both candidates lie
+        // within the segment [0,10], so Seamly2D's "both/neither on
+        // segment: prefer closer to p1" tiebreak applies, selecting the
+        // smaller-distance one: 5-sqrt(7).
+        let sqrt7 = 7.0_f64.sqrt();
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 5.0, 3.0);
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p2 = doc.add_base_point("P2", 10.0, 0.0);
+        let result = doc.add_point_of_contact("X", center, p1, p2, "4").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(result).unwrap();
+        assert!((point.x - (5.0 - sqrt7)).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn point_of_contact_golden_value_prefers_the_candidate_actually_on_the_segment() {
+        // Same circle as the ambiguous-case test above (center=(5,3),
+        // radius=4), but p1=(4,0), p2=(10,0): the segment is now [4,10].
+        // Candidate 5-sqrt(7)=~2.354 falls OUTSIDE [4,10]; candidate
+        // 5+sqrt(7)=~7.646 falls INSIDE it — exactly one candidate is truly
+        // on the segment, so it's selected regardless of which is closer
+        // to p1 (proving segment membership takes precedence over
+        // proximity, not just "always pick the nearer one").
+        let sqrt7 = 7.0_f64.sqrt();
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 5.0, 3.0);
+        let p1 = doc.add_base_point("P1", 4.0, 0.0);
+        let p2 = doc.add_base_point("P2", 10.0, 0.0);
+        let result = doc.add_point_of_contact("X", center, p1, p2, "4").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let point = data.get_point(result).unwrap();
+        assert!((point.x - (5.0 + sqrt7)).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn point_of_contact_circle_never_reaches_the_line_is_degenerate() {
+        let mut doc = Document::default();
+        let center = doc.add_base_point("Center", 5.0, 100.0); // far above the line
+        let p1 = doc.add_base_point("P1", 0.0, 0.0);
+        let p2 = doc.add_base_point("P2", 10.0, 0.0);
+        doc.add_point_of_contact("X", center, p1, p2, "1").unwrap(); // radius 1, distance to line is 100
+
+        let err = recompute_all(&doc).unwrap_err();
+        assert!(matches!(err, PatternError::DegenerateGeometry(_)));
     }
 }

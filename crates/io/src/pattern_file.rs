@@ -236,6 +236,88 @@ fn write_tool_record(writer: &mut Writer<Vec<u8>>, record: &ToolRecord) -> std::
                 .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the segment's second endpoint
                 .write_empty()?; // no formula fields: Midpoint is pure geometry
         }
+        ToolKind::ShoulderPoint {
+            name,
+            p1_line,
+            p2_line,
+            shoulder,
+            length_formula,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "shoulderPoint")) // selects the shoulderPoint interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("p1Line", p1_line.raw().to_string().as_str())) // the ray's own starting point
+                .with_attribute(("p2Line", p2_line.raw().to_string().as_str())) // the point defining the ray's direction
+                .with_attribute(("shoulder", shoulder.raw().to_string().as_str())) // the circle's center
+                .with_attribute(("length", length_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .write_empty()?;
+        }
+        ToolKind::LineIntersect {
+            name,
+            p1_line1,
+            p2_line1,
+            p1_line2,
+            p2_line2,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "lineIntersect")) // selects the lineIntersect interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("p1Line1", p1_line1.raw().to_string().as_str())) // the first line's first defining point
+                .with_attribute(("p2Line1", p2_line1.raw().to_string().as_str())) // the first line's second defining point
+                .with_attribute(("p1Line2", p1_line2.raw().to_string().as_str())) // the second line's first defining point
+                .with_attribute(("p2Line2", p2_line2.raw().to_string().as_str())) // the second line's second defining point
+                .write_empty()?; // no formula fields: LineIntersect is pure geometry
+        }
+        ToolKind::PointOfIntersection { name, p1, p2 } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "pointOfIntersection")) // selects the pointOfIntersection interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // the point this one takes its x coordinate from
+                .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the point this one takes its y coordinate from
+                .write_empty()?; // no formula fields: PointOfIntersection is pure geometry
+        }
+        ToolKind::Triangle {
+            name,
+            axis_p1,
+            axis_p2,
+            hypotenuse_p1,
+            hypotenuse_p2,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "triangle")) // selects the triangle interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("axisP1", axis_p1.raw().to_string().as_str())) // the reference line's first defining point
+                .with_attribute(("axisP2", axis_p2.raw().to_string().as_str())) // the reference line's second defining point
+                .with_attribute(("hypotenuseP1", hypotenuse_p1.raw().to_string().as_str())) // one endpoint of the segment forming the right angle
+                .with_attribute(("hypotenuseP2", hypotenuse_p2.raw().to_string().as_str())) // the other endpoint of that segment
+                .write_empty()?; // no formula fields: Triangle is pure geometry
+        }
+        ToolKind::PointOfContact {
+            name,
+            center,
+            p1,
+            p2,
+            radius_formula,
+        } => {
+            writer
+                .create_element("point")
+                .with_attribute(("type", "pointOfContact")) // selects the pointOfContact interpretation of <point>
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the point's user-facing label
+                .with_attribute(("center", center.raw().to_string().as_str())) // the circle's center
+                .with_attribute(("firstPoint", p1.raw().to_string().as_str())) // the segment's first endpoint
+                .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the segment's second endpoint
+                .with_attribute(("radius", radius_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .write_empty()?;
+        }
         ToolKind::Piece {
             name,
             nodes,
@@ -519,6 +601,91 @@ fn parse_point(start: &BytesStart) -> Result<ToolRecord, PatternFileError> {
             Ok(ToolRecord {
                 id,                                        // the id parsed above
                 kind: ToolKind::Midpoint { name, p1, p2 }, // a straight-line midpoint, referenced by id
+            })
+        }
+        "shoulderPoint" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1_line = parse_id("point", &attrs, "p1Line")?; // the ray's own starting point
+            let p2_line = parse_id("point", &attrs, "p2Line")?; // the point defining the ray's direction
+            let shoulder = parse_id("point", &attrs, "shoulder")?; // the circle's center
+            let length_formula = require_attr("point", &attrs, "length")?.to_string(); // the circle-radius formula, unevaluated
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::ShoulderPoint {
+                    name,
+                    p1_line,
+                    p2_line,
+                    shoulder,
+                    length_formula,
+                },
+            })
+        }
+        "lineIntersect" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1_line1 = parse_id("point", &attrs, "p1Line1")?; // the first line's first defining point
+            let p2_line1 = parse_id("point", &attrs, "p2Line1")?; // the first line's second defining point
+            let p1_line2 = parse_id("point", &attrs, "p1Line2")?; // the second line's first defining point
+            let p2_line2 = parse_id("point", &attrs, "p2Line2")?; // the second line's second defining point
+                                                                  // no formula attributes: LineIntersect is pure geometry
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::LineIntersect {
+                    name,
+                    p1_line1,
+                    p2_line1,
+                    p1_line2,
+                    p2_line2,
+                },
+            })
+        }
+        "pointOfIntersection" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let p1 = parse_id("point", &attrs, "firstPoint")?; // the point this one takes its x coordinate from
+            let p2 = parse_id("point", &attrs, "secondPoint")?; // the point this one takes its y coordinate from
+                                                                // no formula attributes: PointOfIntersection is pure geometry
+            Ok(ToolRecord {
+                id,                                                   // the id parsed above
+                kind: ToolKind::PointOfIntersection { name, p1, p2 }, // combines p1's x with p2's y, referenced by id
+            })
+        }
+        "triangle" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let axis_p1 = parse_id("point", &attrs, "axisP1")?; // the reference line's first defining point
+            let axis_p2 = parse_id("point", &attrs, "axisP2")?; // the reference line's second defining point
+            let hypotenuse_p1 = parse_id("point", &attrs, "hypotenuseP1")?; // one endpoint of the segment forming the right angle
+            let hypotenuse_p2 = parse_id("point", &attrs, "hypotenuseP2")?; // the other endpoint of that segment
+                                                                            // no formula attributes: Triangle is pure geometry
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::Triangle {
+                    name,
+                    axis_p1,
+                    axis_p2,
+                    hypotenuse_p1,
+                    hypotenuse_p2,
+                },
+            })
+        }
+        "pointOfContact" => {
+            let id = parse_id("point", &attrs, "id")?; // this tool's own id
+            let name = require_attr("point", &attrs, "name")?.to_string(); // the point's user-facing label
+            let center = parse_id("point", &attrs, "center")?; // the circle's center
+            let p1 = parse_id("point", &attrs, "firstPoint")?; // the segment's first endpoint
+            let p2 = parse_id("point", &attrs, "secondPoint")?; // the segment's second endpoint
+            let radius_formula = require_attr("point", &attrs, "radius")?.to_string(); // the circle-radius formula, unevaluated
+            Ok(ToolRecord {
+                id, // the id parsed above
+                kind: ToolKind::PointOfContact {
+                    name,
+                    center,
+                    p1,
+                    p2,
+                    radius_formula,
+                },
             })
         }
         other => Err(PatternFileError::UnknownToolType(other.to_string())), // future-proofs against files referencing tool types this parser version doesn't know about, rather than silently ignoring or misinterpreting them
@@ -947,5 +1114,105 @@ mod tests {
             }
             other => panic!("expected MissingAttribute, got {other:?}"),
         }
+    }
+
+    // Part C round-trip tests: one per newly added tool, same pattern as
+    // the along_line/normal/bisector/height/midpoint round-trip tests
+    // above — build a Document using exactly one of the five new tools,
+    // serialize it, deserialize the result, and confirm post-recompute
+    // geometry matches between the original and the round-tripped Document.
+
+    #[test]
+    fn shoulder_point_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1_line = original.add_base_point("P1Line", 0.0, 0.0);
+        let p2_line = original.add_base_point("P2Line", 10.0, 0.0);
+        let shoulder = original.add_base_point("Shoulder", 15.0, 8.0);
+        original
+            .add_shoulder_point("S", p1_line, p2_line, shoulder, "10")
+            .unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn line_intersect_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1_line1 = original.add_base_point("P1L1", 0.0, 0.0);
+        let p2_line1 = original.add_base_point("P2L1", 3.0, 3.0);
+        let p1_line2 = original.add_base_point("P1L2", 0.0, 4.0);
+        let p2_line2 = original.add_base_point("P2L2", 4.0, 0.0);
+        original
+            .add_line_intersect("X", p1_line1, p2_line1, p1_line2, p2_line2)
+            .unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn point_of_intersection_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let p1 = original.add_base_point("P1", 3.0, 7.0);
+        let p2 = original.add_base_point("P2", 9.0, -2.0);
+        original.add_point_of_intersection("X", p1, p2).unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn triangle_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let axis_p1 = original.add_base_point("AxisP1", 0.0, 0.0);
+        let axis_p2 = original.add_base_point("AxisP2", 20.0, 0.0);
+        let hyp_p1 = original.add_base_point("HypP1", 8.0, -3.0);
+        let hyp_p2 = original.add_base_point("HypP2", 14.0, 9.0);
+        original
+            .add_triangle("T", axis_p1, axis_p2, hyp_p1, hyp_p2)
+            .unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+    }
+
+    #[test]
+    fn point_of_contact_round_trip_preserves_recompute_result() {
+        let mut original = Document::default();
+        let center = original.add_base_point("Center", 5.0, 3.0);
+        let p1 = original.add_base_point("P1", 0.0, 0.0);
+        let p2 = original.add_base_point("P2", 10.0, 0.0);
+        original
+            .add_point_of_contact("X", center, p1, p2, "4")
+            .unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
     }
 }

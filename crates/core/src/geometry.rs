@@ -64,7 +64,12 @@ fn offset_edge(
 /// Solves the standard 2x2 linear system `p1 + t*d1 = p2 + s*d2` for `t`
 /// via Cramer's rule, then evaluates `p1 + t*d1` to get the intersection
 /// point (solving for `s` too would give the same point, so it's skipped).
-fn line_intersection(
+///
+/// `pub(crate)`, not private: originally built only for [`offset_polygon`]'s
+/// own miter-join math, but Phase 10b's `LineIntersect`/`Triangle` tools in
+/// `recompute.rs` need the exact same infinite-line-line intersection, so
+/// this is reused directly rather than reimplementing it a second time.
+pub(crate) fn line_intersection(
     p1: (f64, f64), // a point on the first line
     d1: (f64, f64), // the first line's direction vector
     p2: (f64, f64), // a point on the second line
@@ -72,9 +77,12 @@ fn line_intersection(
 ) -> Result<(f64, f64), PatternError> {
     let cross = d1.0 * d2.1 - d1.1 * d2.0; // the 2D cross product of the two directions; the linear system's determinant
     if cross.abs() < 1e-9 {
-        // the two directions are parallel (or anti-parallel): the two edges meeting at this vertex are collinear, so there's no unique miter point
+        // the two directions are parallel (or anti-parallel): no unique
+        // intersection exists. The message stays generic (not
+        // piece-offsetting-specific wording) now that LineIntersect/Triangle
+        // also call this helper, not just offset_polygon.
         return Err(PatternError::DegenerateGeometry(format!(
-            "piece contour has two collinear/parallel edges meeting at a vertex near {p1:?}" // names roughly where the failure is
+            "two lines are parallel/collinear: no unique intersection exists (first line through {p1:?})" // names roughly where the failure is
         )));
     }
     // Rearranging `p1 + t*d1 = p2 + s*d2` into `t*d1 - s*d2 = (p2 - p1)`
@@ -88,6 +96,51 @@ fn line_intersection(
     let intersection_x = p1.0 + t * d1.0; // walk `t` units along the first line's direction from p1
     let intersection_y = p1.1 + t * d1.1; // same, for y
     Ok((intersection_x, intersection_y)) // the point where the two infinite lines cross
+}
+
+/// Computes where an infinite line intersects a circle: zero points (the
+/// line misses the circle), one point (the line is exactly tangent), or two
+/// points.
+///
+/// Mirrors Seamly2D's `VGObject::LineIntersectCircle`: project `circle_center`
+/// onto the line to get the foot of the perpendicular, then walk
+/// `±sqrt(radius^2 - d^2)` units from that foot along the line's own
+/// direction, where `d` is the distance from `circle_center` to the foot.
+///
+/// `line_unit_dir` must already be normalized to unit length — the caller
+/// (every Phase 10b tool using this) already computes and validates a unit
+/// direction for its own degenerate-input checks (e.g. "are these two
+/// points coincident"), so this helper stays a pure, always-succeeds
+/// function rather than re-deriving/re-validating a direction itself.
+pub(crate) fn line_circle_intersection(
+    line_point: (f64, f64),    // any point on the line
+    line_unit_dir: (f64, f64), // the line's direction, already unit length
+    circle_center: (f64, f64), // the circle's center
+    radius: f64,               // the circle's radius; must be >= 0.0
+) -> Vec<(f64, f64)> {
+    let to_center_x = circle_center.0 - line_point.0; // x component of the vector from line_point to circle_center
+    let to_center_y = circle_center.1 - line_point.1; // y component
+    let t = to_center_x * line_unit_dir.0 + to_center_y * line_unit_dir.1; // dot product: how far along the line direction the foot of the perpendicular lands
+    let foot_x = line_point.0 + t * line_unit_dir.0; // the foot's x coordinate: the closest point on the line to circle_center
+    let foot_y = line_point.1 + t * line_unit_dir.1; // the foot's y coordinate
+    let dx = circle_center.0 - foot_x; // x component of the foot-to-center vector
+    let dy = circle_center.1 - foot_y; // y component
+    let d = (dx * dx + dy * dy).sqrt(); // the line's distance from the circle's center
+
+    if d > radius + 1e-9 {
+        // the line passes too far from the center to reach the circle at all
+        return Vec::new();
+    }
+
+    let k = (radius * radius - d * d).max(0.0).sqrt(); // half-chord length; clamped at 0.0 so float error when d is extremely close to radius never produces a tiny negative operand to sqrt
+    if k < 1e-9 {
+        vec![(foot_x, foot_y)] // tangent: the line touches the circle at exactly one point, the foot itself
+    } else {
+        vec![
+            (foot_x + k * line_unit_dir.0, foot_y + k * line_unit_dir.1), // one intersection, k units forward from the foot
+            (foot_x - k * line_unit_dir.0, foot_y - k * line_unit_dir.1), // the other, k units backward from the foot
+        ]
+    }
 }
 
 /// Computes a simplified miter-join outward offset of a closed, straight-
@@ -211,5 +264,41 @@ mod tests {
         let cw_triangle = [(0.0, 0.0), (0.0, 10.0), (10.0, 0.0)]; // same points, opposite order: clockwise
         assert!(signed_area(&ccw_triangle) > 0.0);
         assert!(signed_area(&cw_triangle) < 0.0);
+    }
+
+    #[test]
+    fn line_circle_intersection_two_points_matches_hand_calculation() {
+        // Line: horizontal, through (0,0), direction (1,0). Circle: center
+        // (15,8), radius 10. Hand-calculated: the perpendicular foot of
+        // (15,8) onto y=0 is (15,0); distance from center to foot is 8;
+        // half-chord k = sqrt(10^2 - 8^2) = sqrt(36) = 6; intersections are
+        // (15,0) +/- 6*(1,0) = (21,0) and (9,0).
+        let points = line_circle_intersection((0.0, 0.0), (1.0, 0.0), (15.0, 8.0), 10.0);
+        assert_eq!(points.len(), 2);
+        let contains_near = |target: (f64, f64)| {
+            points
+                .iter()
+                .any(|p| (p.0 - target.0).abs() < 1e-9 && (p.1 - target.1).abs() < 1e-9)
+        };
+        assert!(contains_near((21.0, 0.0)));
+        assert!(contains_near((9.0, 0.0)));
+    }
+
+    #[test]
+    fn line_circle_intersection_tangent_line_produces_exactly_one_point() {
+        // Circle center (0,5), radius 5: the x-axis (y=0) touches it at
+        // exactly one point, (0,0) — the closest point on the line to the
+        // center is exactly `radius` away.
+        let points = line_circle_intersection((-10.0, 0.0), (1.0, 0.0), (0.0, 5.0), 5.0);
+        assert_eq!(points.len(), 1);
+        assert!((points[0].0 - 0.0).abs() < 1e-9);
+        assert!((points[0].1 - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_circle_intersection_too_far_returns_no_points() {
+        // Circle center (0,100), radius 1: nowhere near the x-axis.
+        let points = line_circle_intersection((-10.0, 0.0), (1.0, 0.0), (0.0, 100.0), 1.0);
+        assert!(points.is_empty());
     }
 }

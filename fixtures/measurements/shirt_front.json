@@ -4,8 +4,9 @@
     { "name": "shoulder_width", "value": 13.0, "description": "Horizontal distance from center front to the shoulder tip" },
     { "name": "neck_width", "value": 8.0, "description": "Half neck width: center front to where the neck curve meets the shoulder line" },
     { "name": "front_neck_depth", "value": 9.0, "description": "Vertical drop from the top of center front to the front neck curve's lowest point" },
-    { "name": "shoulder_drop", "value": 2.0, "description": "Vertical drop from the top of center front to the shoulder point" },
-    { "name": "armhole_depth", "value": 22.0, "description": "Vertical distance from the top of center front to underarm level" },
-    { "name": "body_length", "value": 65.0, "description": "Vertical distance from the top of center front to the hem" }
+    { "name": "back_neck_depth", "value": 2.0, "description": "Vertical drop from the top of center back to the back neck curve's lowest point (much shallower than front_neck_depth)" },
+    { "name": "shoulder_drop", "value": 2.0, "description": "Vertical drop from the top of center front/back to the shoulder point" },
+    { "name": "armhole_depth", "value": 22.0, "description": "Vertical distance from the top of center front/back to underarm level" },
+    { "name": "body_length", "value": 65.0, "description": "Vertical distance from the top of center front/back to the hem" }
   ]
 }

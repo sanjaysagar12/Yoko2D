@@ -1,0 +1,51 @@
+{
+  "measurements_path": "fixtures/measurements/shirt_front.json",
+  "actions": [
+    { "op": "add_base_point", "name": "B1", "x": 0.0, "y": 0.0 },
+
+    { "op": "add_end_line", "name": "B2", "base_point": "B1", "angle_formula": "-90", "length_formula": "back_neck_depth" },
+    { "op": "add_end_line", "name": "B3", "base_point": "B1", "angle_formula": "-90", "length_formula": "armhole_depth" },
+    { "op": "add_end_line", "name": "B4", "base_point": "B1", "angle_formula": "-90", "length_formula": "body_length" },
+    { "op": "add_end_line", "name": "B5", "base_point": "B1", "angle_formula": "0", "length_formula": "neck_width" },
+
+    { "op": "add_end_line", "name": "B6", "base_point": "B5", "angle_formula": "-atan(shoulder_drop/(shoulder_width-neck_width))", "length_formula": "3" },
+    { "op": "add_shoulder_point", "name": "B7", "p1_line": "B5", "p2_line": "B6", "shoulder": "B1", "length_formula": "sqrt(shoulder_width^2+shoulder_drop^2)" },
+
+    { "op": "add_end_line", "name": "B8", "base_point": "B3", "angle_formula": "0", "length_formula": "half_chest" },
+    { "op": "add_end_line", "name": "B9", "base_point": "B8", "angle_formula": "-90", "length_formula": "body_length-armhole_depth" },
+
+    { "op": "add_point_of_intersection", "name": "B10", "p1": "B5", "p2": "B2" },
+
+    { "op": "add_spline", "name": "BackNeckCurve", "p1": "B5", "p4": "B2",
+      "angle1_formula": "-90", "length1_formula": "back_neck_depth*2/3",
+      "angle2_formula": "0", "length2_formula": "neck_width*2/3" },
+    { "op": "add_midpoint", "name": "B11", "p1": "B5", "p2": "B10" },
+    { "op": "add_midpoint", "name": "B12", "p1": "B10", "p2": "B2" },
+    { "op": "add_midpoint", "name": "B13", "p1": "B11", "p2": "B12" },
+
+    { "op": "add_point_of_intersection", "name": "B20", "p1": "B7", "p2": "B8" },
+
+    { "op": "add_spline", "name": "BackArmholeCurve", "p1": "B7", "p4": "B8",
+      "angle1_formula": "-90", "length1_formula": "(armhole_depth-shoulder_drop)*2/3",
+      "angle2_formula": "180", "length2_formula": "(half_chest-shoulder_width)*2/3" },
+    { "op": "add_midpoint", "name": "B21", "p1": "B7", "p2": "B20" },
+    { "op": "add_midpoint", "name": "B22", "p1": "B20", "p2": "B8" },
+    { "op": "add_midpoint", "name": "B23", "p1": "B21", "p2": "B22" },
+
+    { "op": "add_line", "p1": "B5", "p2": "B13" },
+    { "op": "add_line", "p1": "B13", "p2": "B2" },
+    { "op": "add_line", "p1": "B2", "p2": "B4" },
+    { "op": "add_line", "p1": "B4", "p2": "B9" },
+    { "op": "add_line", "p1": "B9", "p2": "B8" },
+    { "op": "add_line", "p1": "B8", "p2": "B23" },
+    { "op": "add_line", "p1": "B23", "p2": "B7" },
+    { "op": "add_line", "p1": "B7", "p2": "B5" },
+
+    {
+      "op": "add_piece",
+      "name": "ShirtBack",
+      "points": ["B5", "B13", "B2", "B4", "B9", "B8", "B23", "B7"],
+      "seam_allowance_formula": "0"
+    }
+  ]
+}

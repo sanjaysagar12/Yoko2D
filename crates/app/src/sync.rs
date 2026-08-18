@@ -33,7 +33,12 @@ pub enum SyncError {
 pub struct PatternSync {
     document: core_lib::Document, // the persistent tool history (Phases 3/4's source of truth)
     current_data: core_lib::PatternData, // the most recently resolved geometry cache
-    measurement_path: PathBuf,    // where resync reads measurements from each time it's called
+    // `None` means this PatternSync has no measurement file to track at
+    // all (see `Self::new_without_measurements`) — `resync` then simply
+    // recomputes against whatever variables `document` already carries,
+    // rather than trying to read a file that doesn't exist for this
+    // instance.
+    measurement_path: Option<PathBuf>, // where resync reads measurements from each time it's called, if anywhere
     undo_stack: core_lib::UndoStack, // the undo/redo history of edits made to `document` via `perform_edit`
 }
 
@@ -46,28 +51,54 @@ impl PatternSync {
         let mut sync = PatternSync {
             document,                                       // the caller-supplied starting document
             current_data: core_lib::PatternData::default(), // placeholder: replaced by the resync call below before this returns
-            measurement_path, // the caller-supplied measurement file path
+            measurement_path: Some(measurement_path), // the caller-supplied measurement file path, tracked from now on
             undo_stack: core_lib::UndoStack::default(), // no edits recorded yet
         };
         sync.resync()?; // populate current_data (and re-apply measurements to document) right away; propagate any failure
         Ok(sync) // resync succeeded: the returned PatternSync is fully in sync with the file
     }
 
-    /// Reloads measurements from `measurement_path` and recomputes the
-    /// pattern's geometry, replacing `document`/`current_data` only if
-    /// every step succeeds.
-    pub fn resync(&mut self) -> Result<(), SyncError> {
-        // Load first, before touching `self` at all: if this fails, `self`
-        // must remain exactly as it was — an unreadable/malformed file on a
-        // later resync should never corrupt a previously-good in-memory state.
-        let measurements = io::load_measurements_from_file(&self.measurement_path)?;
+    /// Builds a `PatternSync` for `document` with NO measurement file to
+    /// track — `document`'s variables (e.g. baked in by an action-script
+    /// executor via `apply_measurements`, before this is ever called) are
+    /// used exactly as given, and `resync`/the file watcher have nothing
+    /// to reload from for the lifetime of this instance.
+    ///
+    /// Exists for `app::run_with_document`'s "open a Document that has no
+    /// associated measurement file" case — the CLI-generated-pattern path
+    /// this crate's `run_with_document` supports, where an action script
+    /// may legitimately have no `measurements_path` at all.
+    pub fn new_without_measurements(document: core_lib::Document) -> Result<Self, SyncError> {
+        let mut sync = PatternSync {
+            document, // the caller-supplied starting document, variables already however the caller wants them
+            current_data: core_lib::PatternData::default(), // placeholder: replaced by the resync call below before this returns
+            measurement_path: None,                         // no file to track for this instance
+            undo_stack: core_lib::UndoStack::default(),     // no edits recorded yet
+        };
+        sync.resync()?; // populate current_data via a single recompute; no measurement file to reload from, so this can only fail if `document` itself is invalid
+        Ok(sync) // resync succeeded: the returned PatternSync reflects `document` exactly as given
+    }
 
+    /// Reloads measurements from `measurement_path` (if this `PatternSync`
+    /// has one) and recomputes the pattern's geometry, replacing
+    /// `document`/`current_data` only if every step succeeds.
+    pub fn resync(&mut self) -> Result<(), SyncError> {
         // Work on a clone of the document, not `self.document` directly, so
         // that if a later step (recompute) fails, `self.document` is never
         // left partially updated — `self` is only touched once every
         // fallible step below has already succeeded.
         let mut candidate_document = self.document.clone(); // clone: self.document stays untouched until the very end
-        candidate_document.apply_measurements(measurements); // infallible: just replaces/sets variables on the clone
+
+        if let Some(path) = &self.measurement_path {
+            // Load first, before mutating the candidate at all: if this
+            // fails, `self` must remain exactly as it was — an
+            // unreadable/malformed file on a later resync should never
+            // corrupt a previously-good in-memory state.
+            let measurements = io::load_measurements_from_file(path)?;
+            candidate_document.apply_measurements(measurements); // infallible: just replaces/sets variables on the clone
+        }
+        // else: no measurement file tracked for this instance; recompute
+        // below uses whatever variables `candidate_document` already has.
 
         // Recompute against the candidate, still without touching `self`:
         // if this fails, `self.document`/`self.current_data` must remain
@@ -230,6 +261,36 @@ mod tests {
 
         let point = sync.current_data().get_point(a1).unwrap();
         assert!((point.x - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn new_without_measurements_resolves_geometry_from_the_documents_own_variables() {
+        let mut doc = core_lib::Document::default();
+        doc.set_variable(
+            "height_scapula",
+            core_lib::Variable::Measurement { value: 40.0 },
+        ); // baked directly into the Document, as an action-script executor would do, with no measurement file involved at all
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let a1 = doc.add_end_line("A1", a, "0", "height_scapula/10").unwrap();
+
+        let sync = PatternSync::new_without_measurements(doc).unwrap();
+        let point = sync.current_data().get_point(a1).unwrap();
+        assert!((point.x - 4.0).abs() < 1e-9);
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resync_on_a_sync_without_measurements_is_a_no_op_reload_but_still_recomputes() {
+        let mut doc = core_lib::Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 1.0, 1.0);
+        let mut sync = PatternSync::new_without_measurements(doc).unwrap();
+
+        // No measurement file to fail to read, and no variables changed:
+        // resync should simply succeed and leave the same two points resolved.
+        sync.resync().unwrap();
+        assert!(sync.current_data().get_point(a).is_ok());
+        assert!(sync.current_data().get_point(b).is_ok());
     }
 
     #[test]

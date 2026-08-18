@@ -5,13 +5,16 @@ pub mod watch; // WatchEvent, WatchError, WatcherHandle, spawn_watcher
 
 /// The root egui application state.
 struct Yoko2DApp {
-    sync: sync::PatternSync, // the current Document + its resolved PatternData, kept in sync with the measurement file
-    // Kept alive only for its Drop impl (see WatcherHandle's own doc
-    // comment): dropping this would silently stop the background watcher
-    // thread, so it must live exactly as long as `events` is expected to
-    // keep receiving anything. Never read otherwise, hence the leading `_`.
-    _watcher_handle: watch::WatcherHandle,
-    events: std::sync::mpsc::Receiver<watch::WatchEvent>, // where debounced "measurement file changed" notifications arrive
+    sync: sync::PatternSync, // the current Document + its resolved PatternData, kept in sync with the measurement file (if any)
+    // `None` when this app was opened via `run_with_document` with no
+    // measurement path (see that function) — there is then no file being
+    // watched at all, and `events` is correspondingly `None` too. Kept
+    // alive only for its Drop impl (see WatcherHandle's own doc comment):
+    // dropping this would silently stop the background watcher thread, so
+    // it must live exactly as long as `events` is expected to keep
+    // receiving anything. Never read otherwise, hence the leading `_`.
+    _watcher_handle: Option<watch::WatcherHandle>,
+    events: Option<std::sync::mpsc::Receiver<watch::WatchEvent>>, // where debounced "measurement file changed" notifications arrive, if this instance is watching a file at all
     camera: camera::Camera, // pattern-space -> screen-pixel conversion state for this window
     tool_controller: tool_controller::ToolController, // which construction tool is selected and its in-progress clicks (Phase 11)
     active_dialog: Option<tool_controller::PendingDialog>, // a formula dialog currently open, if any (Phase 11)
@@ -69,10 +72,6 @@ fn commit_tool_kind(sync: &mut sync::PatternSync, kind: core_lib::ToolKind) {
                 undo_stack.do_add_normal(doc, name, p1, p2, length_formula, angle_formula)?; // propagate a validation failure, if any
                 Ok(())
             }
-            // Bisector/Height aren't reachable through this phase's toolbar (no
-            // ToolKindSelector variant creates them), but ToolKind is a shared
-            // type with more variants than this phase's UI produces — handled
-            // here anyway rather than leaving this match non-exhaustive.
             core_lib::ToolKind::Bisector {
                 name,
                 p1,
@@ -187,6 +186,18 @@ fn render_dialog_fields(
             let angle_ok = formula_field(ui, "Angle:", angle_formula, vars); // same, for the angle field
             !name.is_empty() && length_ok && angle_ok // ready to commit only if every check passes
         }
+        tool_controller::PendingDialog::Bisector {
+            name,
+            length_formula,
+            ..
+        } => {
+            ui.horizontal(|ui| {
+                ui.label("Name:"); // caption for the name field
+                ui.text_edit_singleline(name); // editable name text
+            });
+            let length_ok = formula_field(ui, "Length:", length_formula, vars); // draws the field, returns whether it currently validates
+            !name.is_empty() && length_ok // ready to commit only if every check passes
+        }
     }
 }
 
@@ -197,13 +208,16 @@ impl eframe::App for Yoko2DApp {
         // blocking `recv()` used by `run_sync_loop` would freeze this paint
         // callback (and therefore the whole UI thread) until the next file
         // change, which is unacceptable inside `update()`.
-        while let Ok(_event) = self.events.try_recv() {
-            if let Err(err) = self.sync.resync() {
-                // A bad measurement-file edit (e.g. caught mid-save with
-                // malformed JSON) must not crash the running app — this
-                // mirrors Seamly2D's own qCWarning-and-continue behavior on
-                // a sync failure: log it, keep the last-good state, move on.
-                eprintln!("yoko2d: resync failed: {err}");
+        if let Some(events) = &self.events {
+            // only an app opened with a real measurement path (see run_with_document) has anything to drain here
+            while let Ok(_event) = events.try_recv() {
+                if let Err(err) = self.sync.resync() {
+                    // A bad measurement-file edit (e.g. caught mid-save with
+                    // malformed JSON) must not crash the running app — this
+                    // mirrors Seamly2D's own qCWarning-and-continue behavior on
+                    // a sync failure: log it, keep the last-good state, move on.
+                    eprintln!("yoko2d: resync failed: {err}");
+                }
             }
         }
 
@@ -260,6 +274,14 @@ impl eframe::App for Yoko2DApp {
                 if ui.button("Normal").clicked() {
                     self.tool_controller
                         .select_tool(tool_controller::ToolKindSelector::Normal);
+                }
+                if ui.button("Bisector").clicked() {
+                    self.tool_controller
+                        .select_tool(tool_controller::ToolKindSelector::Bisector);
+                }
+                if ui.button("Height").clicked() {
+                    self.tool_controller
+                        .select_tool(tool_controller::ToolKindSelector::Height);
                 }
             });
         });
@@ -370,6 +392,12 @@ impl eframe::App for Yoko2DApp {
                 tool_controller::ToolMode::Normal {
                     first: Some(id), ..
                 } => Some(*id),
+                tool_controller::ToolMode::Bisector {
+                    first: Some(id), ..
+                } => Some(*id),
+                tool_controller::ToolMode::Height {
+                    first: Some(id), ..
+                } => Some(*id),
                 _ => None, // no tool, or a tool with no first click collected yet: nothing to preview
             };
             if let Some(first_id) = in_progress_first {
@@ -441,20 +469,20 @@ impl eframe::App for Yoko2DApp {
     }
 }
 
-/// Builds the small demo [`sync::PatternSync`] + watcher this phase's
-/// `run()` displays: a `BasePoint` "A" at the origin and an `EndLine` "A1"
-/// whose length comes from the bundled `height_scapula` measurement, so
-/// editing that measurement's value on disk visibly moves the drawn line
-/// while the app is running.
+/// Builds the small demo [`core_lib::Document`] this crate's `run()`
+/// displays: a `BasePoint` "A" at the origin and an `EndLine` "A1" whose
+/// length comes from the bundled `height_scapula` measurement, so editing
+/// that measurement's value on disk visibly moves the drawn line while the
+/// app is running.
 ///
-/// TODO(later phase): this bakes in a demo document and the bundled fixture
-/// file's path — real "open a pattern"/"open a measurement file" UI (out
-/// of scope for this phase) will replace this with a user-driven flow.
-fn build_demo_sync() -> (
-    sync::PatternSync,                            // the constructed sync state
-    watch::WatcherHandle, // its accompanying watcher handle, to keep alive alongside it
-    std::sync::mpsc::Receiver<watch::WatchEvent>, // the channel that handle's watcher delivers events on
-) {
+/// TODO(later phase): this bakes in a demo document — real "open a
+/// pattern" UI (out of scope for this phase) will replace this with a
+/// user-driven flow. Splitting this out from the old `build_demo_sync`
+/// (which also built the `PatternSync`/watcher) is what lets `run()` and
+/// `run_with_document` below share the exact same window/watcher setup
+/// code, rather than duplicating it — this function only builds the
+/// `Document` itself.
+fn build_demo_document() -> core_lib::Document {
     let mut document = core_lib::Document::default(); // start from an empty pattern document
     let base = document.add_base_point("A", 0.0, 0.0); // a literal starting point at the pattern's origin
     let end = document
@@ -463,43 +491,101 @@ fn build_demo_sync() -> (
     document
         .add_line(base, end) // a visible line segment from A to A1, so there's something to see and watch change on screen
         .expect("both A and A1 were just created above, so these references are always valid"); // infallible given the lines above; documented, not swallowed
-
-    let manifest_dir = env!("CARGO_MANIFEST_DIR"); // crates/app at build time; the fixture lives two levels up from there
-    let measurement_path =
-        std::path::Path::new(manifest_dir).join("../../fixtures/measurements/sample.json"); // the bundled demo measurement file
-
-    let sync =
-        sync::PatternSync::new(document, measurement_path.clone()) // build the sync state, resolving against the fixture immediately
-            .expect("bundled demo measurement fixture should always be present and valid"); // a missing/broken bundled fixture is a build-time setup bug, not a runtime condition to recover from
-
-    let (watcher_handle, events) = watch::spawn_watcher(
-        measurement_path,
-        std::time::Duration::from_millis(300),
-    ) // watch that same file for edits, 300ms debounce
-    .expect("failed to start file watcher for the bundled demo measurement fixture"); // setup failure here also means the environment is fundamentally broken, not something to gracefully degrade from
-
-    (sync, watcher_handle, events) // hand back everything Yoko2DApp needs to hold onto
+    document // hand back the fully-built demo document
 }
 
-/// Launches the egui application.
+/// The bundled demo measurement fixture's path, resolved relative to this
+/// crate's own manifest directory so it works regardless of the process's
+/// current working directory.
+fn demo_measurements_path() -> std::path::PathBuf {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR"); // crates/app at build time; the fixture lives two levels up from there
+    std::path::Path::new(manifest_dir).join("../../fixtures/measurements/sample.json")
+    // the bundled demo measurement file
+}
+
+/// Launches the egui application showing this crate's own hardcoded demo
+/// pattern.
 ///
 /// Moved here from `main.rs` (now just a thin wrapper calling this
 /// function) so this crate's logic lives in a library target and is
 /// testable — a `main.rs` binary can't be unit tested directly, but code
 /// in `lib.rs` can be exercised by `#[cfg(test)]` modules throughout this
-/// crate the same way `core`/`io` already are.
+/// crate the same way `core`/`io` already are. A thin wrapper itself now,
+/// over [`run_with_document`] — see that function for the actual window/
+/// event-loop setup, shared with the CLI's "generate then open in the GUI"
+/// flow.
 pub fn run() -> eframe::Result<()> {
-    let (sync, watcher_handle, events) = build_demo_sync(); // set up the demo document, its resolved geometry, and its file watcher
-    let app = Yoko2DApp {
-        sync,                                                        // the constructed PatternSync
-        _watcher_handle: watcher_handle, // held only to keep the watcher thread alive; see the field's own comment
-        events,                          // the channel Yoko2DApp::update polls each frame
-        camera: camera::Camera::default(), // a sensible starting pan/zoom (see Camera::default's doc comment)
-        tool_controller: tool_controller::ToolController::default(), // no tool selected initially
-        active_dialog: None,               // no formula dialog open initially
-    };
+    run_with_document(build_demo_document(), Some(demo_measurements_path())) // the demo document, watching its bundled measurement fixture
+}
+
+/// Launches the egui application showing `document`.
+///
+/// `measurements_path`, if given, is both applied to `document` (via
+/// [`sync::PatternSync::new`]) and watched for live changes for the
+/// lifetime of the window, exactly like [`run`]'s own demo pattern. If
+/// `None` (e.g. a CLI-generated pattern whose action script had no
+/// `measurements_path`), the opened window has no measurement file to
+/// watch at all — `document`'s variables are used exactly as the caller
+/// already set them up (see [`sync::PatternSync::new_without_measurements`]).
+///
+/// This is the shared entry point both [`run`] (the bundled demo) and the
+/// `cli` crate's `run --open` flow use, so the actual window/event-loop
+/// setup exists in exactly one place rather than being duplicated between
+/// them.
+pub fn run_with_document(
+    document: core_lib::Document, // the pattern to open, already fully built (e.g. by an action-script executor, or build_demo_document above)
+    measurements_path: Option<std::path::PathBuf>, // an optional measurement file to apply and keep watching
+) -> eframe::Result<()> {
     let options = eframe::NativeOptions::default(); // default window/backend configuration, unchanged from Phase 0
-    eframe::run_native("Yoko2D", options, Box::new(|_cc| Ok(Box::new(app)))) // hand the constructed app to eframe's event loop
+    eframe::run_native(
+        "Yoko2D",
+        options,
+        // The actual PatternSync/watcher setup happens INSIDE this
+        // closure, not before calling run_native: eframe's AppCreator
+        // returns `Result<Box<dyn App>, Box<dyn Error + Send + Sync>>`,
+        // so any setup failure here (a malformed measurement file, a
+        // watcher that fails to register) can be reported through
+        // eframe's own native error path — surfacing as this function's
+        // own `Err(eframe::Error::AppCreation(..))` — instead of needing
+        // to panic or invent a separate error-reporting mechanism.
+        Box::new(move |_cc| {
+            let (sync, watcher_handle, events): (
+                sync::PatternSync,
+                Option<watch::WatcherHandle>,
+                Option<std::sync::mpsc::Receiver<watch::WatchEvent>>,
+            ) =
+                match measurements_path {
+                    Some(path) => {
+                        let sync = sync::PatternSync::new(document, path.clone()) // build the sync state, resolving against the given file immediately
+                            .map_err(|err| {
+                                Box::new(err) as Box<dyn std::error::Error + Send + Sync>
+                            })?; // lift SyncError into the boxed error AppCreator expects
+                        let (watcher_handle, events) =
+                            watch::spawn_watcher(path, std::time::Duration::from_millis(300)) // watch that same file for edits, 300ms debounce
+                                .map_err(|err| {
+                                    Box::new(err) as Box<dyn std::error::Error + Send + Sync>
+                                })?; // lift WatchError the same way
+                        (sync, Some(watcher_handle), Some(events)) // this instance IS watching a file
+                    }
+                    None => {
+                        let sync = sync::PatternSync::new_without_measurements(document) // no file to apply/watch; use document's variables exactly as given
+                            .map_err(|err| {
+                                Box::new(err) as Box<dyn std::error::Error + Send + Sync>
+                            })?; // lift SyncError the same way
+                        (sync, None, None) // this instance has nothing to watch
+                    }
+                };
+            let app = Yoko2DApp {
+                sync, // the constructed PatternSync, watching a file or not per the match above
+                _watcher_handle: watcher_handle, // held only to keep the watcher thread alive, if there is one; see the field's own comment
+                events, // the channel Yoko2DApp::update polls each frame, if there is one
+                camera: camera::Camera::default(), // a sensible starting pan/zoom (see Camera::default's doc comment)
+                tool_controller: tool_controller::ToolController::default(), // no tool selected initially
+                active_dialog: None, // no formula dialog open initially
+            };
+            Ok(Box::new(app) as Box<dyn eframe::App>) // hand the constructed app back to eframe's event loop
+        }),
+    )
 }
 
 /// Blocks on `events`, calling `sync.resync()` once per received

@@ -56,6 +56,25 @@ pub enum ToolMode {
         first: Option<core_lib::ObjectId>, // the point measured from, once clicked; None until then
         second: Option<core_lib::ObjectId>, // the point defining the perpendicular line, once clicked; None until then
     },
+
+    /// Needs exactly three clicks, all on EXISTING points; then opens a
+    /// dialog to collect the length formula before it can commit. Only
+    /// the first two clicks need a slot here — the third completes the
+    /// sequence directly, the same convention `AlongLine`/`Normal` above
+    /// already follow.
+    Bisector {
+        first: Option<core_lib::ObjectId>, // p1, one angle ray, once clicked; None until then
+        second: Option<core_lib::ObjectId>, // p2, the angle's vertex, once clicked; None until then
+    },
+
+    /// Needs exactly three clicks, all on EXISTING points; commits
+    /// immediately once all three are collected — no formula dialog,
+    /// since `Height` is pure geometry (a perpendicular projection) with
+    /// no formula fields at all.
+    Height {
+        first: Option<core_lib::ObjectId>, // `point` (the point being projected), once clicked; None until then
+        second: Option<core_lib::ObjectId>, // `line_p1` (one point defining the line), once clicked; None until then
+    },
 }
 
 /// A formula-collecting dialog waiting for the user to fill in name/
@@ -84,6 +103,13 @@ pub enum PendingDialog {
         name: String,           // starts empty
         length_formula: String, // starts empty
         angle_formula: String,  // starts empty
+    },
+    Bisector {
+        p1: core_lib::ObjectId, // fixed once the dialog opens: one angle ray
+        p2: core_lib::ObjectId, // fixed once the dialog opens: the angle's vertex
+        p3: core_lib::ObjectId, // fixed once the dialog opens: the other angle ray
+        name: String,           // starts empty
+        length_formula: String, // starts empty
     },
 }
 
@@ -150,6 +176,8 @@ pub enum ToolKindSelector {
     EndLine,
     AlongLine,
     Normal,
+    Bisector,
+    Height,
 }
 
 /// The pure tool-selection state machine: which tool is active, and how
@@ -193,6 +221,14 @@ impl ToolController {
                 first: None, // no points collected yet
                 second: None,
             },
+            ToolKindSelector::Bisector => ToolMode::Bisector {
+                first: None, // no points collected yet
+                second: None,
+            },
+            ToolKindSelector::Height => ToolMode::Height {
+                first: None, // no points collected yet
+                second: None,
+            },
         };
     }
 
@@ -218,6 +254,14 @@ impl ToolController {
                 second: None,
             },
             ToolMode::Normal { .. } => ToolMode::Normal {
+                first: None, // discard any in-progress clicks
+                second: None,
+            },
+            ToolMode::Bisector { .. } => ToolMode::Bisector {
+                first: None, // discard any in-progress clicks
+                second: None,
+            },
+            ToolMode::Height { .. } => ToolMode::Height {
                 first: None, // discard any in-progress clicks
                 second: None,
             },
@@ -368,6 +412,84 @@ impl ToolController {
                     }
                 }
             }
+
+            ToolMode::Bisector { first, second } => {
+                // needs three clicks (unlike the two-click AlongLine/Normal above), so the match below covers three progress states, not two
+                let Some(hit) = hit_point else {
+                    return ClickOutcome::Ignored; // all three Bisector clicks must land on EXISTING points
+                };
+                match (first, second) {
+                    (None, _) => {
+                        // first of three required clicks
+                        self.mode = ToolMode::Bisector {
+                            first: Some(hit), // remember the first angle ray
+                            second: None,
+                        };
+                        ClickOutcome::NeedMoreInput
+                    }
+                    (Some(p1), None) => {
+                        // second of three required clicks
+                        self.mode = ToolMode::Bisector {
+                            first: Some(p1),   // carry the first click forward unchanged
+                            second: Some(hit), // remember the angle's vertex
+                        };
+                        ClickOutcome::NeedMoreInput
+                    }
+                    (Some(p1), Some(p2)) => {
+                        // third click: all three points known, so open the formula dialog and reset immediately
+                        self.mode = ToolMode::Bisector {
+                            first: None, // reset right away, same rationale as EndLine/AlongLine/Normal above
+                            second: None,
+                        };
+                        ClickOutcome::OpenDialog(PendingDialog::Bisector {
+                            p1,                            // fixed now
+                            p2,                            // fixed now
+                            p3: hit,                       // fixed now
+                            name: String::new(),           // starts empty
+                            length_formula: String::new(), // starts empty
+                        })
+                    }
+                }
+            }
+
+            ToolMode::Height { first, second } => {
+                // also needs three clicks, but — unlike Bisector — completes immediately on the third: Height has no formula fields at all
+                let Some(hit) = hit_point else {
+                    return ClickOutcome::Ignored; // all three Height clicks must land on EXISTING points
+                };
+                match (first, second) {
+                    (None, _) => {
+                        // first of three required clicks
+                        self.mode = ToolMode::Height {
+                            first: Some(hit), // remember the point being projected
+                            second: None,
+                        };
+                        ClickOutcome::NeedMoreInput
+                    }
+                    (Some(point), None) => {
+                        // second of three required clicks
+                        self.mode = ToolMode::Height {
+                            first: Some(point), // carry the first click forward unchanged
+                            second: Some(hit),  // remember the line's first defining point
+                        };
+                        ClickOutcome::NeedMoreInput
+                    }
+                    (Some(point), Some(line_p1)) => {
+                        // third click: all three points known, so the tool is complete — no dialog, since Height has no formulas
+                        let kind = core_lib::ToolKind::Height {
+                            name: "H".to_string(), // placeholder name; real naming/numbering is a future UI refinement, out of scope here
+                            point,
+                            line_p1,
+                            line_p2: hit,
+                        };
+                        self.mode = ToolMode::Height {
+                            first: None, // ready for another Height immediately
+                            second: None,
+                        };
+                        ClickOutcome::Complete(kind)
+                    }
+                }
+            }
         }
     }
 
@@ -434,6 +556,24 @@ impl ToolController {
                     p2,             // carried through unchanged
                     length_formula, // carried through unchanged
                     angle_formula,  // carried through unchanged
+                })
+            }
+            PendingDialog::Bisector {
+                p1,
+                p2,
+                p3,
+                name,
+                length_formula,
+            } => {
+                if name.is_empty() {
+                    return Err("name must not be empty".to_string());
+                }
+                Ok(core_lib::ToolKind::Bisector {
+                    name,           // carried through unchanged
+                    p1,             // carried through unchanged
+                    p2,             // carried through unchanged
+                    p3,             // carried through unchanged
+                    length_formula, // carried through unchanged
                 })
             }
         }
@@ -621,5 +761,86 @@ mod tests {
                 length_formula: "10".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn bisector_three_valid_clicks_open_dialog_with_empty_fields() {
+        let mut controller = ToolController::default();
+        controller.select_tool(ToolKindSelector::Bisector);
+        let p1 = core_lib::ObjectId::from_raw(1);
+        let p2 = core_lib::ObjectId::from_raw(2);
+        let p3 = core_lib::ObjectId::from_raw(3);
+
+        let first = controller.handle_click((0.0, 0.0), Some(p1));
+        assert_eq!(first, ClickOutcome::NeedMoreInput);
+        let second = controller.handle_click((1.0, 1.0), Some(p2));
+        assert_eq!(second, ClickOutcome::NeedMoreInput);
+
+        let third = controller.handle_click((2.0, 2.0), Some(p3));
+        assert_eq!(
+            third,
+            ClickOutcome::OpenDialog(PendingDialog::Bisector {
+                p1,
+                p2,
+                p3,
+                name: String::new(),
+                length_formula: String::new(),
+            })
+        );
+        assert_eq!(
+            controller.current_mode(),
+            &ToolMode::Bisector {
+                first: None,
+                second: None
+            }
+        ); // reset immediately, ready for another Bisector sequence
+    }
+
+    #[test]
+    fn height_three_valid_clicks_complete_immediately_with_no_dialog() {
+        let mut controller = ToolController::default();
+        controller.select_tool(ToolKindSelector::Height);
+        let point = core_lib::ObjectId::from_raw(1);
+        let line_p1 = core_lib::ObjectId::from_raw(2);
+        let line_p2 = core_lib::ObjectId::from_raw(3);
+
+        let first = controller.handle_click((0.0, 0.0), Some(point));
+        assert_eq!(first, ClickOutcome::NeedMoreInput);
+        let second = controller.handle_click((1.0, 1.0), Some(line_p1));
+        assert_eq!(second, ClickOutcome::NeedMoreInput);
+
+        let third = controller.handle_click((2.0, 2.0), Some(line_p2));
+        assert_eq!(
+            third,
+            ClickOutcome::Complete(core_lib::ToolKind::Height {
+                name: "H".to_string(),
+                point,
+                line_p1,
+                line_p2,
+            })
+        );
+        assert_eq!(
+            controller.current_mode(),
+            &ToolMode::Height {
+                first: None,
+                second: None
+            }
+        ); // ready for another Height immediately
+    }
+
+    #[test]
+    fn bisector_ignores_a_click_that_hits_nothing() {
+        let mut controller = ToolController::default();
+        controller.select_tool(ToolKindSelector::Bisector);
+
+        let outcome = controller.handle_click((5.0, 5.0), None);
+        assert_eq!(outcome, ClickOutcome::Ignored);
+        assert_eq!(
+            controller.current_mode(),
+            &ToolMode::Bisector {
+                first: None,
+                second: None
+            }
+        ); // unchanged by an ignored click
     }
 }

@@ -1,0 +1,13 @@
+{
+  "measurements_path": "fixtures/measurements/sample.json",
+  "actions": [
+    { "op": "add_base_point", "name": "A", "x": 0.0, "y": 0.0 },
+    { "op": "add_end_line", "name": "A1", "base_point": "A", "angle_formula": "0", "length_formula": "height_scapula/10" },
+    { "op": "add_line", "p1": "A", "p2": "A1" },
+    { "op": "add_along_line", "name": "A2", "p1": "A", "p2": "A1", "length_formula": "10" },
+    { "op": "add_normal", "name": "A3", "p1": "A", "p2": "A1", "length_formula": "5", "angle_formula": "0" },
+    { "op": "add_bisector", "name": "A4", "p1": "A", "p2": "A1", "p3": "A3", "length_formula": "3" },
+    { "op": "add_height", "name": "A5", "point": "A2", "line_p1": "A", "line_p2": "A1" },
+    { "op": "add_midpoint", "name": "A6", "p1": "A", "p2": "A1" }
+  ]
+}

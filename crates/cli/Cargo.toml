@@ -7,10 +7,26 @@ edition.workspace = true
 name = "yoko2d-cli"
 path = "src/main.rs"
 
+# The dependency on the `core` package is aliased to `core_lib` here, for the
+# same reason `crates/io/Cargo.toml` and `crates/app/Cargo.toml` do it: this
+# crate uses `thiserror::Error` (in `action_script.rs`), whose derive macro
+# expands to code referencing bare `core::fmt`/`core::write` paths. Binding
+# this dependency to the plain name `core` would collide with (and shadow)
+# the real sysroot `core` crate in this crate's extern prelude, breaking
+# that macro expansion.
 [dependencies]
-core = { path = "../core" }
+core_lib = { package = "core", path = "../core" }
 io = { path = "../io" }
+# Only `app`'s public API is used here (`app::run_with_document`), never
+# egui/eframe types directly — this crate deliberately does NOT depend on
+# egui/eframe itself, keeping the actual window/event-loop code confined to
+# the `app` crate per this repo's existing crate-boundary discipline.
+app = { path = "../app" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
+tempfile.workspace = true

@@ -49,6 +49,26 @@ fn run_with_output_flag_writes_expected_point_and_line_data() {
 }
 
 #[test]
+fn run_with_export_image_flag_writes_a_nonempty_png_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let image_path = dir.path().join("output.png");
+
+    Command::cargo_bin("yoko2d-cli")
+        .unwrap()
+        .current_dir(workspace_root())
+        .arg("run")
+        .arg("fixtures/actions/l_to_rectangle.json")
+        .arg("--export-image")
+        .arg(&image_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exported image to"));
+
+    let metadata = std::fs::metadata(&image_path).unwrap();
+    assert!(metadata.len() > 0); // a real PNG was actually written, not an empty file
+}
+
+#[test]
 fn run_on_a_nonexistent_script_fails_with_a_clear_stderr_message() {
     Command::cargo_bin("yoko2d-cli")
         .unwrap()

@@ -963,6 +963,56 @@ mod tests {
         assert!((point.y - 5.0).abs() < 1e-9); // NOT -5.0: confirms the rotation direction matches Seamly2D's actual behavior
     }
 
+    #[test]
+    fn end_line_parity_matches_qlinef_setangle_convention_no_sign_flip() {
+        // Seamly2D: VToolEndLine::Create builds `QLineF line; line.setAngle(angle);
+        // line.setLength(length);` starting from `basePoint`. Per Qt's own docs,
+        // `QLineF::setAngle` measures its `angle` counter-clockwise in a
+        // conventional (mathematical, "up is positive") sense despite Qt's
+        // underlying pixel coordinates being y-down internally — the same
+        // `atan2(-dy, dx)` deliberate negation already cited in the Normal
+        // parity test above. Converting that into Yoko2D's plain y-up (x,y)
+        // convention (never negated until camera.rs's final screen-paint
+        // step) means `dx = length*cos(angle)`, `dy = length*sin(angle)`
+        // with NO extra sign flip — exactly the plain trig formula
+        // `recompute_all`'s `ToolKind::EndLine` arm already uses.
+        //
+        // The ONLY existing EndLine test before this one
+        // (`recompute_resolves_end_line_and_line_from_formulas`, using
+        // angle=0) cannot actually catch a sign error in the sine term:
+        // sin(0)=0 regardless of which sign convention is used. This test
+        // picks two non-trivial angles specifically to discriminate a
+        // sign-flipped or swapped-axis implementation from the correct one.
+        let mut doc = Document::default();
+
+        // angle=90 degrees, length=5, base=(0,0): a pure-y case that would
+        // visibly mirror to (0,-5) if the y-component's sign were flipped
+        // (the exact same discriminating shape as the Normal parity test).
+        let base1 = doc.add_base_point("Base1", 0.0, 0.0);
+        let ninety = doc.add_end_line("E90", base1, "90", "5").unwrap();
+
+        // angle=30 degrees, length=10, base=(2,3): both x and y components
+        // are nonzero and unequal, so this also catches a cos/sin axis swap,
+        // not just a sign flip.
+        let base2 = doc.add_base_point("Base2", 2.0, 3.0);
+        let thirty = doc.add_end_line("E30", base2, "30", "10").unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+
+        let point90 = data.get_point(ninety).unwrap();
+        // Hand-verified: (0,0) + 5*(cos(90deg),sin(90deg)) = (0,0)+5*(0,1) = (0,5).
+        assert!((point90.x - 0.0).abs() < 1e-9);
+        assert!((point90.y - 5.0).abs() < 1e-9); // NOT -5.0: confirms no sign flip vs. Seamly2D's setAngle convention
+
+        let point30 = data.get_point(thirty).unwrap();
+        // Hand-verified: (2,3) + 10*(cos(30deg),sin(30deg))
+        // = (2,3) + 10*(sqrt(3)/2, 0.5) = (2 + 5*sqrt(3), 3 + 5).
+        let expected_x = 2.0 + 5.0 * 3.0_f64.sqrt();
+        let expected_y = 8.0;
+        assert!((point30.x - expected_x).abs() < 1e-9);
+        assert!((point30.y - expected_y).abs() < 1e-9);
+    }
+
     /// Independently verifies that `candidate` truly bisects the angle
     /// p1-p2-p3 (p2 the vertex) at the given `length` from p2, WITHOUT
     /// relying on either Seamly2D's QLineF-angle formula or this crate's

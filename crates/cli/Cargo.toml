@@ -25,8 +25,15 @@ app = { path = "../app" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# PNG image export (Phase 1) is a CLI-only concern — deliberately not a
+# dependency of `core`, `io`, or `render`, matching this repo's existing
+# crate-boundary discipline (core stays free of every in-repo/heavyweight
+# dependency; render stays a pure PatternData -> DrawCommand translation
+# layer with no drawing-backend knowledge of its own).
+plotters.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
+image.workspace = true # only used to independently verify an exported PNG decodes correctly; not part of the export path itself

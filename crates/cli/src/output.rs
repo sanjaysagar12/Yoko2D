@@ -70,16 +70,15 @@ pub fn build_output(
                 });
             }
             core_lib::GeoObject::Piece(_) => {
-                // Pieces are explicitly out of scope for this task's action-script
-                // format (no `add_piece` operation exists in `Action`), so no
-                // action script this CLI executes can ever produce one — but
-                // GeoObject is a shared type with more variants than this task
-                // covers, so this arm exists to keep the match exhaustive rather
-                // than leaving Piece output support silently unimplemented via a
-                // compile error. Skipped rather than erroring, since a Piece
-                // present in `data` (e.g. loaded from an unrelated pattern file)
-                // is a normal, valid object this snapshot format just doesn't
-                // represent yet.
+                // `PatternOutput` (points + lines only) predates `add_piece`
+                // existing as an action-script op and still doesn't represent
+                // Piece geometry — extending it is a separate concern from
+                // adding the op itself, left for whenever a caller actually
+                // needs a Piece's contour/seam-allowance in this JSON
+                // snapshot format. Skipped rather than erroring: a Piece
+                // present in `data` (e.g. produced by `add_piece`, or loaded
+                // from an unrelated pattern file) is a normal, valid object
+                // this snapshot format just doesn't represent yet.
             }
         }
     }

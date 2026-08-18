@@ -1,0 +1,59 @@
+{
+  "measurements_path": "fixtures/measurements/shirt_front.json",
+  "actions": [
+    { "op": "add_base_point", "name": "A1", "x": 0.0, "y": 0.0 },
+
+    { "op": "add_end_line", "name": "A2", "base_point": "A1", "angle_formula": "-90", "length_formula": "front_neck_depth" },
+    { "op": "add_end_line", "name": "A3", "base_point": "A1", "angle_formula": "-90", "length_formula": "armhole_depth" },
+    { "op": "add_end_line", "name": "A4", "base_point": "A1", "angle_formula": "-90", "length_formula": "body_length" },
+    { "op": "add_end_line", "name": "A5", "base_point": "A1", "angle_formula": "0", "length_formula": "neck_width" },
+
+    { "op": "add_end_line", "name": "A6", "base_point": "A5", "angle_formula": "-atan(shoulder_drop/(shoulder_width-neck_width))", "length_formula": "3" },
+    { "op": "add_shoulder_point", "name": "A7", "p1_line": "A5", "p2_line": "A6", "shoulder": "A1", "length_formula": "sqrt(shoulder_width^2+shoulder_drop^2)" },
+
+    { "op": "add_end_line", "name": "A8", "base_point": "A3", "angle_formula": "0", "length_formula": "half_chest" },
+    { "op": "add_end_line", "name": "A9", "base_point": "A8", "angle_formula": "-90", "length_formula": "body_length-armhole_depth" },
+
+    { "op": "add_point_of_intersection", "name": "A10", "p1": "A5", "p2": "A2" },
+    { "op": "add_midpoint", "name": "A11", "p1": "A5", "p2": "A10" },
+    { "op": "add_midpoint", "name": "A12", "p1": "A10", "p2": "A2" },
+    { "op": "add_midpoint", "name": "A13", "p1": "A11", "p2": "A12" },
+    { "op": "add_midpoint", "name": "A14", "p1": "A5", "p2": "A11" },
+    { "op": "add_midpoint", "name": "A15", "p1": "A11", "p2": "A13" },
+    { "op": "add_midpoint", "name": "A16", "p1": "A14", "p2": "A15" },
+    { "op": "add_midpoint", "name": "A17", "p1": "A13", "p2": "A12" },
+    { "op": "add_midpoint", "name": "A18", "p1": "A12", "p2": "A2" },
+    { "op": "add_midpoint", "name": "A19", "p1": "A17", "p2": "A18" },
+
+    { "op": "add_point_of_intersection", "name": "A20", "p1": "A8", "p2": "A7" },
+    { "op": "add_midpoint", "name": "A21", "p1": "A7", "p2": "A20" },
+    { "op": "add_midpoint", "name": "A22", "p1": "A20", "p2": "A8" },
+    { "op": "add_midpoint", "name": "A23", "p1": "A21", "p2": "A22" },
+    { "op": "add_midpoint", "name": "A24", "p1": "A7", "p2": "A21" },
+    { "op": "add_midpoint", "name": "A25", "p1": "A21", "p2": "A23" },
+    { "op": "add_midpoint", "name": "A26", "p1": "A24", "p2": "A25" },
+    { "op": "add_midpoint", "name": "A27", "p1": "A23", "p2": "A22" },
+    { "op": "add_midpoint", "name": "A28", "p1": "A22", "p2": "A8" },
+    { "op": "add_midpoint", "name": "A29", "p1": "A27", "p2": "A28" },
+
+    { "op": "add_line", "p1": "A5", "p2": "A16" },
+    { "op": "add_line", "p1": "A16", "p2": "A13" },
+    { "op": "add_line", "p1": "A13", "p2": "A19" },
+    { "op": "add_line", "p1": "A19", "p2": "A2" },
+    { "op": "add_line", "p1": "A2", "p2": "A4" },
+    { "op": "add_line", "p1": "A4", "p2": "A9" },
+    { "op": "add_line", "p1": "A9", "p2": "A8" },
+    { "op": "add_line", "p1": "A8", "p2": "A29" },
+    { "op": "add_line", "p1": "A29", "p2": "A23" },
+    { "op": "add_line", "p1": "A23", "p2": "A26" },
+    { "op": "add_line", "p1": "A26", "p2": "A7" },
+    { "op": "add_line", "p1": "A7", "p2": "A5" },
+
+    {
+      "op": "add_piece",
+      "name": "ShirtFront",
+      "points": ["A5", "A16", "A13", "A19", "A2", "A4", "A9", "A8", "A29", "A23", "A26", "A7"],
+      "seam_allowance_formula": "0"
+    }
+  ]
+}

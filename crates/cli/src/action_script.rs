@@ -175,6 +175,21 @@ pub enum Action {
         p2: String, // the NAME of an earlier point; resolved to add_point_of_contact's `p2` parameter
         radius_formula: String, // -> add_point_of_contact's `radius_formula` parameter
     },
+
+    /// Maps to `Document::add_piece(name, nodes, seam_allowance_formula)`.
+    /// `points` is an ordered list of earlier points' NAMES (not raw
+    /// `PieceNode`s): each name is resolved to a `PieceNode` with
+    /// `excluded_from_seam_allowance` always `false` — this action format
+    /// has no way to express per-node exclusion, matching every other
+    /// action's "plain name list, no extra per-reference flags" shape;
+    /// a script needing that finer control would need a new, separate
+    /// action variant, not a change to this one.
+    #[serde(rename = "add_piece")]
+    AddPiece {
+        name: String,                   // -> add_piece's `name` parameter
+        points: Vec<String>, // the NAMEs of earlier points, in perimeter order; each resolved to a PieceNode
+        seam_allowance_formula: String, // -> add_piece's `seam_allowance_formula` parameter
+    },
 }
 
 /// The top-level shape of an action-script JSON file: an optional
@@ -691,6 +706,24 @@ pub fn execute_action_script(
                     p2_id,
                     radius_formula.clone(),
                 )?; // propagate a Document-side validation failure via ActionScriptError::Pattern
+                names.insert(name.clone(), id); // record this name so later actions can reference it
+            }
+            Action::AddPiece {
+                name,
+                points,
+                seam_allowance_formula,
+            } => {
+                reject_if_duplicate(&names, name)?; // refuse before touching the Document if this name is already taken
+                let mut nodes = Vec::with_capacity(points.len()); // the resolved PieceNode list, built up in perimeter order below
+                for point_name in points {
+                    // resolve every perimeter point name to an id, in the order this action lists them, matching add_piece's own node-order contract
+                    let point_id = resolve_name(&names, point_name)?; // look up the referenced point's id, or report exactly which name is missing
+                    nodes.push(core_lib::PieceNode {
+                        point: point_id,                     // this boundary vertex's resolved point id
+                        excluded_from_seam_allowance: false, // this action format has no way to express per-node exclusion; see AddPiece's own doc comment
+                    });
+                }
+                let id = document.add_piece(name.clone(), nodes, seam_allowance_formula.clone())?; // propagate a Document-side validation failure via ActionScriptError::Pattern
                 names.insert(name.clone(), id); // record this name so later actions can reference it
             }
         }

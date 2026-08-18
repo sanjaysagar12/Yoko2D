@@ -1,7 +1,18 @@
 mod action_script; // ActionScript, Action, ActionScriptError, load_action_script, execute_action_script
+mod image_export; // ImageExportError, export_pattern_image
 mod output; // PatternOutput, build_output, write_output_to_file
 
 use std::path::PathBuf; // the path type every file-path argument below is parsed into
+
+/// The fixed pixel dimensions every `--export-image` PNG is rendered at.
+///
+/// Not exposed as its own CLI flag: a fixed, generously-sized default
+/// keeps both subcommands' argument parsing simple, and `export_pattern_image`
+/// already scales/centers whatever geometry it's given to fill exactly
+/// this canvas, so there's no correctness reason a caller would need a
+/// different size today.
+const EXPORT_IMAGE_WIDTH: u32 = 1200;
+const EXPORT_IMAGE_HEIGHT: u32 = 900;
 
 /// Entry point: dispatches on the first CLI argument to pick a subcommand.
 ///
@@ -22,9 +33,9 @@ fn main() {
             // no subcommand, or an unrecognized one: print usage and fail loudly rather than guessing what was meant
             eprintln!("Usage:");
             eprintln!("  yoko2d-cli formula-check");
-            eprintln!("  yoko2d-cli run <action-script.json> [--output <path.json>] [--save-pattern <path.xml>] [--open]");
+            eprintln!("  yoko2d-cli run <action-script.json> [--output <path.json>] [--save-pattern <path.xml>] [--export-image <path.png>] [--open]");
             eprintln!(
-                "  yoko2d-cli view <pattern.xml> [--measurements <path.json>] [--raw] [--open]"
+                "  yoko2d-cli view <pattern.xml> [--measurements <path.json>] [--raw] [--export-image <path.png>] [--open]"
             );
             std::process::exit(1); // a missing/unknown subcommand is a usage error: exit non-zero, never panic
         }
@@ -56,9 +67,10 @@ fn run_command(args: &[String]) {
     let mut script_path: Option<PathBuf> = None; // the positional action-script path, once found
     let mut output_path: Option<PathBuf> = None; // set if --output <path> was given
     let mut save_pattern_path: Option<PathBuf> = None; // set if --save-pattern <path> was given
+    let mut export_image_path: Option<PathBuf> = None; // set if --export-image <path> was given
     let mut open_gui = false; // set if --open was given
 
-    let mut i = 0; // manual index, since --output/--save-pattern each consume two consecutive arguments (the flag and its value)
+    let mut i = 0; // manual index, since --output/--save-pattern/--export-image each consume two consecutive arguments (the flag and its value)
     while i < args.len() {
         // walk every argument, recognizing flags and treating anything else as the positional script path
         match args[i].as_str() {
@@ -77,6 +89,14 @@ fn run_command(args: &[String]) {
                 };
                 save_pattern_path = Some(PathBuf::from(value)); // record the path that follows --save-pattern
                 i += 2; // consumed both --save-pattern and its value
+            }
+            "--export-image" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("yoko2d-cli: --export-image requires a path argument"); // a bare trailing --export-image with nothing after it is a usage error
+                    std::process::exit(1);
+                };
+                export_image_path = Some(PathBuf::from(value)); // record the path that follows --export-image
+                i += 2; // consumed both --export-image and its value
             }
             "--open" => {
                 open_gui = true; // a boolean flag: no following value to consume
@@ -154,6 +174,25 @@ fn run_command(args: &[String]) {
             std::process::exit(1);
         });
         println!("yoko2d-cli: saved pattern to {}", path.display()); // success message, matching --output's own success-message style
+    }
+
+    if let Some(path) = &export_image_path {
+        // `document` here is the exact same value execute_action_script
+        // returned above, and `data` is the same already-resolved
+        // PatternData `--output`/`--save-pattern` above already used — so
+        // this reuses both rather than recomputing anything.
+        image_export::export_pattern_image(
+            &data,
+            &document,
+            path,
+            EXPORT_IMAGE_WIDTH,
+            EXPORT_IMAGE_HEIGHT,
+        )
+        .unwrap_or_else(|err| {
+            eprintln!("yoko2d-cli: failed to export image: {err}"); // e.g. the export path's parent directory doesn't exist
+            std::process::exit(1);
+        });
+        println!("yoko2d-cli: exported image to {}", path.display()); // success message, per this flag's own contract
     }
 
     if open_gui {
@@ -316,8 +355,9 @@ fn view_command(args: &[String]) {
     let mut measurements_path: Option<PathBuf> = None; // set if --measurements <path> was given
     let mut raw = false; // set if --raw was given
     let mut open_gui = false; // set if --open was given
+    let mut export_image_path: Option<PathBuf> = None; // set if --export-image <path> was given
 
-    let mut i = 0; // manual index, since --measurements consumes two consecutive arguments (the flag and its value)
+    let mut i = 0; // manual index, since --measurements/--export-image each consume two consecutive arguments (the flag and its value)
     while i < args.len() {
         // walk every argument, recognizing flags and treating anything else as the positional pattern path
         match args[i].as_str() {
@@ -332,6 +372,14 @@ fn view_command(args: &[String]) {
             "--raw" => {
                 raw = true; // a boolean flag: no following value to consume
                 i += 1; // consumed just this one argument
+            }
+            "--export-image" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("yoko2d-cli: --export-image requires a path argument"); // a bare trailing --export-image with nothing after it is a usage error
+                    std::process::exit(1);
+                };
+                export_image_path = Some(PathBuf::from(value)); // record the path that follows --export-image
+                i += 2; // consumed both --export-image and its value
             }
             "--open" => {
                 open_gui = true; // a boolean flag: no following value to consume
@@ -364,13 +412,13 @@ fn view_command(args: &[String]) {
         // mode exists for piping/diffing/scripting against the literal XML
         // text, not for a human-readable summary.
         print!("{contents}"); // print the exact raw file contents verbatim, including whatever trailing newline (or lack of one) the file itself has
-        if !open_gui {
-            return; // no --open given either: nothing more to do
+        if !open_gui && export_image_path.is_none() {
+            return; // neither --open nor --export-image given either: nothing more to do
         }
-        // --open was ALSO given: fall through to load the Document below and
-        // open it, still skipping the Tools:/Resolved geometry summary
-        // printing --raw intentionally bypasses — --raw and --open are not
-        // mutually exclusive.
+        // --open and/or --export-image was ALSO given: fall through to load
+        // the Document below and use it, still skipping the Tools:/Resolved
+        // geometry summary printing --raw intentionally bypasses — --raw is
+        // not mutually exclusive with either of those flags.
     }
 
     let (document, embedded_measurements_path) = io::deserialize_document(&contents)
@@ -458,6 +506,39 @@ fn view_command(args: &[String]) {
                 ); // e.g. a formula referencing a measurement that was never loaded
             }
         }
+    }
+
+    if let Some(path) = &export_image_path {
+        // A separate `doc_for_export`/recompute, rather than reusing
+        // `if !raw`'s own `doc_for_recompute`/`data`: those are scoped
+        // (and, for `data`, best-effort/skippable-on-failure) to that
+        // block's own resolved-geometry PRINTING, whereas a caller who
+        // explicitly asked for `--export-image` should get a hard failure
+        // if recompute fails, not a silently-skipped image — so this
+        // applies the exact same "script-level, else embedded" measurement
+        // resolution independently, in its own scope.
+        let mut doc_for_export = document.clone(); // clone so this export's own measurement application never mutates the Document `--open` below (or the Tools: listing above) used
+        if let Some(mpath) = &effective_measurements_path {
+            if let Ok(measurements) = io::load_measurements_from_file(mpath) {
+                doc_for_export.apply_measurements(measurements); // seed the variables this pattern's formulas may reference
+            }
+        }
+        let data = core_lib::recompute_all(&doc_for_export).unwrap_or_else(|err| {
+            eprintln!("yoko2d-cli: failed to export image: could not resolve geometry ({err})"); // e.g. a formula referencing a measurement that was never loaded
+            std::process::exit(1);
+        });
+        image_export::export_pattern_image(
+            &data,
+            &doc_for_export,
+            path,
+            EXPORT_IMAGE_WIDTH,
+            EXPORT_IMAGE_HEIGHT,
+        )
+        .unwrap_or_else(|err| {
+            eprintln!("yoko2d-cli: failed to export image: {err}"); // e.g. the export path's parent directory doesn't exist
+            std::process::exit(1);
+        });
+        println!("yoko2d-cli: exported image to {}", path.display()); // success message, per this flag's own contract
     }
 
     if open_gui {

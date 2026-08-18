@@ -18,3 +18,16 @@ notify = "8.2.0"
 notify-debouncer-mini = "0.7.0"
 tempfile = "3.27.0"
 quick-xml = "0.41.0"
+# `default-features = false` + an explicit feature list, NOT the crate's
+# default feature set: plotters' own Cargo.toml (checked directly rather
+# than assumed, since a wrong feature name here is a well-known source of
+# confusing plotters build errors) has no feature literally named
+# "bitmap" — the real names are `bitmap_backend` (the `BitMapBackend`
+# drawing target itself), `bitmap_encoder` (pulls in `plotters-bitmap`'s
+# `image_encoder` feature, needed to actually write the drawn bitmap out
+# as a PNG file rather than just an in-memory pixel buffer), and `ttf`
+# (pulls in `font-kit`/`ttf-parser`, needed to render the point-name text
+# labels this task's image export requires — without it, plotters has no
+# real font backend to draw text with at all).
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "ttf"] }
+image = { version = "0.25", default-features = false, features = ["png"] } # used only by cli's own tests, to independently verify an exported file really decodes as a valid PNG

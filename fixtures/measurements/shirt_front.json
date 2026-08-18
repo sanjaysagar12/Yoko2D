@@ -1,0 +1,11 @@
+{
+  "measurements": [
+    { "name": "half_chest", "value": 50.0, "description": "Quarter chest circumference plus wearing ease" },
+    { "name": "shoulder_width", "value": 13.0, "description": "Horizontal distance from center front to the shoulder tip" },
+    { "name": "neck_width", "value": 8.0, "description": "Half neck width: center front to where the neck curve meets the shoulder line" },
+    { "name": "front_neck_depth", "value": 9.0, "description": "Vertical drop from the top of center front to the front neck curve's lowest point" },
+    { "name": "shoulder_drop", "value": 5.0, "description": "Vertical drop from the top of center front to the shoulder point" },
+    { "name": "armhole_depth", "value": 22.0, "description": "Vertical distance from the top of center front to underarm level" },
+    { "name": "body_length", "value": 65.0, "description": "Vertical distance from the top of center front to the hem" }
+  ]
+}

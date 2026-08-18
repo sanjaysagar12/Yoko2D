@@ -94,6 +94,39 @@ pub enum Action {
         p1: String,   // the NAME of an earlier point; resolved to add_midpoint's `p1` parameter
         p2: String,   // the NAME of an earlier point; resolved to add_midpoint's `p2` parameter
     },
+
+    /// Maps to `Document::remove_tool(id)`, resolved from `name`. Modifies
+    /// the loaded/starting Document IN PLACE rather than rebuilding it: the
+    /// named tool's `ToolRecord` is deleted from history, and every other
+    /// record (loaded or added earlier in this same script) is left
+    /// completely untouched.
+    #[serde(rename = "remove_tool")]
+    RemoveTool {
+        name: String, // the NAME of an earlier (or loaded) point; resolved to the id passed to remove_tool
+    },
+
+    /// Maps to `Document::replace_tool_kind(id, ToolKind::BasePoint { .. })`,
+    /// resolved from `name`. Both `x`/`y` are optional so a script can move
+    /// a point along just one axis without needing to already know and
+    /// repeat the other axis's current value; whichever field is `None`
+    /// falls back to that point's CURRENT stored value.
+    #[serde(rename = "modify_base_point")]
+    ModifyBasePoint {
+        name: String, // the NAME of an earlier (or loaded) point; must already resolve to a ToolKind::BasePoint
+        x: Option<f64>, // new literal x coordinate; `None` keeps the current value
+        y: Option<f64>, // new literal y coordinate; `None` keeps the current value
+    },
+
+    /// Maps to `Document::replace_tool_kind(id, ToolKind::EndLine { .. })`,
+    /// resolved from `name`. Same "optional field falls back to the
+    /// current stored value" contract as `ModifyBasePoint`, applied to the
+    /// angle/length formula strings instead of literal coordinates.
+    #[serde(rename = "modify_end_line")]
+    ModifyEndLine {
+        name: String, // the NAME of an earlier (or loaded) point; must already resolve to a ToolKind::EndLine
+        angle_formula: Option<String>, // new angle formula string; `None` keeps the current formula
+        length_formula: Option<String>, // new length formula string; `None` keeps the current formula
+    },
 }
 
 /// The top-level shape of an action-script JSON file: an optional
@@ -106,6 +139,16 @@ pub struct ActionScript {
     /// every action's formulas can already reference its measurements.
     /// `None` if this script needs no measurements.
     pub measurements_path: Option<String>,
+    /// Path to an existing pattern XML file (the format
+    /// `io::serialize_document`/`io::deserialize_document` read/write) to
+    /// load as the STARTING `Document`, instead of starting from
+    /// `core_lib::Document::default()`. When present, every action in this
+    /// script is applied ON TOP OF the loaded document's existing
+    /// history, in order, exactly like actions are applied when there's
+    /// no starting pattern — the only difference is the starting point
+    /// isn't empty. `None` means this script builds a brand-new pattern
+    /// from scratch, the original (Phase 9) behavior.
+    pub load_pattern_path: Option<String>,
     /// Every action to replay, in order — later actions may reference
     /// points earlier ones defined, by name.
     pub actions: Vec<Action>,
@@ -151,6 +194,33 @@ pub enum ActionScriptError {
     /// automatically.
     #[error("failed to load measurements: {0}")]
     Measurement(#[from] io::MeasurementError), // the underlying measurement-file failure
+
+    /// Loading/parsing the referenced `load_pattern_path` pattern file
+    /// failed. Wrapped via `#[from]` so `?` converts an
+    /// `io::PatternFileError` automatically.
+    #[error("failed to load pattern: {0}")]
+    PatternFile(#[from] io::PatternFileError), // the underlying pattern-file load/parse failure
+
+    /// A `Document::remove_tool`/`Document::replace_tool_kind` call (from a
+    /// `remove_tool`/`modify_base_point`/`modify_end_line` action) was
+    /// rejected. Wrapped via `#[from]` so `?` converts a
+    /// `core_lib::DocumentError` automatically. Distinct from `Pattern`
+    /// above: that variant wraps `core_lib::PatternError`, the error type
+    /// the `add_*` constructors return, which is unrelated to `Document`'s
+    /// own `DocumentError`.
+    #[error("failed to modify document: {0}")]
+    Document(#[from] core_lib::DocumentError), // the underlying Document-mutation failure
+
+    /// A `modify_base_point`/`modify_end_line` action targeted a name that
+    /// resolves to a tool of a different `ToolKind` than the action
+    /// expects, e.g. `modify_base_point` on a name that's actually an
+    /// `EndLine`.
+    #[error("action expected {name:?} to be a {expected}, but it is a {found}")]
+    WrongToolType {
+        name: String,     // the name that was targeted
+        expected: String, // the ToolKind variant the action required
+        found: String,    // the ToolKind variant the name actually resolved to
+    },
 }
 
 /// Reads and parses the action script at `path`.
@@ -158,6 +228,50 @@ pub fn load_action_script(path: &Path) -> Result<ActionScript, ActionScriptError
     let contents = std::fs::read_to_string(path)?; // read the whole file into memory; propagate an I/O failure (e.g. file not found) via ActionScriptError::Io
     let script: ActionScript = serde_json::from_str(&contents)?; // parse the JSON text into the expected shape; propagate a malformed-JSON failure via ActionScriptError::Json
     Ok(script) // successfully loaded and parsed
+}
+
+/// Extracts a `ToolKind`'s `name` field, if it has one.
+///
+/// `Document` itself has no built-in name index — names only exist as a
+/// field inside each `ToolKind` — so anything that wants to resolve "the
+/// point named B" back to an `ObjectId` has to scan history and extract
+/// this field itself. Used both when building the initial `names` map from
+/// a freshly loaded pattern file (below) and could equally be reused by
+/// any future caller needing the same lookup (e.g. `main.rs`'s `view`
+/// subcommand, which reuses this exact function rather than duplicating
+/// the match).
+pub(crate) fn tool_name(kind: &core_lib::ToolKind) -> Option<&str> {
+    match kind {
+        // every point-producing variant carries a user-facing `name` field
+        core_lib::ToolKind::BasePoint { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::EndLine { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::AlongLine { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Normal { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Bisector { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Height { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Midpoint { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Piece { name, .. } => Some(name.as_str()),
+        core_lib::ToolKind::Line { .. } => None, // the only variant with no user-facing name
+    }
+}
+
+/// Returns the bare variant name of `kind` (e.g. `"BasePoint"`,
+/// `"EndLine"`), for `ActionScriptError::WrongToolType`'s `found` field —
+/// a human-readable label naming what a name actually resolved to, when a
+/// `modify_*` action expected a different `ToolKind`.
+pub(crate) fn tool_kind_variant_name(kind: &core_lib::ToolKind) -> &'static str {
+    match kind {
+        // one arm per ToolKind variant, returning its bare name as a string literal
+        core_lib::ToolKind::BasePoint { .. } => "BasePoint",
+        core_lib::ToolKind::EndLine { .. } => "EndLine",
+        core_lib::ToolKind::Line { .. } => "Line",
+        core_lib::ToolKind::AlongLine { .. } => "AlongLine",
+        core_lib::ToolKind::Normal { .. } => "Normal",
+        core_lib::ToolKind::Bisector { .. } => "Bisector",
+        core_lib::ToolKind::Height { .. } => "Height",
+        core_lib::ToolKind::Midpoint { .. } => "Midpoint",
+        core_lib::ToolKind::Piece { .. } => "Piece",
+    }
 }
 
 /// Looks up `name` in the executor's name -> id tracking table, reporting
@@ -193,10 +307,57 @@ fn reject_if_duplicate(
 pub fn execute_action_script(
     script: &ActionScript,
 ) -> Result<core_lib::Document, ActionScriptError> {
-    let mut document = core_lib::Document::default(); // start from a completely empty pattern document
-    let mut names: HashMap<String, core_lib::ObjectId> = HashMap::new(); // tracks every named point defined so far, built up as actions are processed in order
+    // `document`/`names`/`embedded_measurements_path` are built up
+    // differently depending on whether `load_pattern_path` is set, then
+    // used identically below regardless of which branch produced them.
+    let (mut document, mut names, embedded_measurements_path): (
+        core_lib::Document,
+        HashMap<String, core_lib::ObjectId>,
+        Option<String>,
+    ) = match &script.load_pattern_path {
+        Some(path) => {
+            // Resolved relative to the CURRENT WORKING DIRECTORY, same
+            // convention as `measurements_path` just below (see that
+            // branch's own comment for the rationale).
+            let contents = std::fs::read_to_string(Path::new(path))?; // propagate a missing/unreadable file via ActionScriptError::Io
+            let (loaded_document, embedded_path) = io::deserialize_document(&contents)?; // propagate a malformed pattern file via ActionScriptError::PatternFile
 
-    if let Some(path) = &script.measurements_path {
+            let mut names = HashMap::new(); // built fresh from the loaded document's own history
+            for record in loaded_document.history() {
+                // every named tool in the loaded file gets indexed, so later actions can reference it by name
+                if let Some(name) = tool_name(&record.kind) {
+                    // Deliberately permissive: if a hand-edited or
+                    // externally-produced XML file somehow contains two
+                    // tools sharing a name (which a session built entirely
+                    // through this executor's own DuplicateName check
+                    // below could never produce), the LATER one in history
+                    // order simply wins the map entry here, rather than
+                    // rejecting the load outright. This is distinct from —
+                    // and more permissive than — the stricter
+                    // DuplicateName rejection this same function still
+                    // applies below to any NEW name a script action itself
+                    // tries to introduce.
+                    names.insert(name.to_string(), record.id);
+                }
+            }
+            (loaded_document, names, embedded_path)
+        }
+        None => (core_lib::Document::default(), HashMap::new(), None), // unchanged original behavior: start from a completely empty pattern document
+    };
+
+    // Script-level `measurements_path` takes precedence (unchanged
+    // existing behavior); otherwise, fall back to whatever
+    // `<measurementsPath>` the loaded pattern file itself referenced, if
+    // any — a saved pattern file may reference the measurement file it was
+    // built against, and using it when the action script doesn't specify
+    // its own override is a reasonable default. If neither is present, no
+    // measurements are applied, exactly as before this capability existed.
+    let effective_measurements_path = script
+        .measurements_path
+        .clone()
+        .or(embedded_measurements_path);
+
+    if let Some(path) = &effective_measurements_path {
         // Resolved relative to the CURRENT WORKING DIRECTORY, not the
         // action script file's own location: resolving relative to the
         // script file would be more robust (the script would keep working
@@ -310,6 +471,81 @@ pub fn execute_action_script(
                 let id = document.add_midpoint(name.clone(), p1_id, p2_id)?; // propagate a Document-side validation failure via ActionScriptError::Pattern
                 names.insert(name.clone(), id); // record this name so later actions can reference it
             }
+            Action::RemoveTool { name } => {
+                // MODIFIES the loaded/starting Document IN PLACE by
+                // deleting one ToolRecord — it must never rebuild the
+                // Document from scratch or lose any other unrelated
+                // ToolRecord already in history.
+                let id = resolve_name(&names, name)?; // look up the referenced tool's id, or report exactly which name is missing
+                document.remove_tool(id)?; // propagate a Document-side failure (e.g. ToolInUse) via ActionScriptError::Document; called directly, not through UndoStack, since this executor builds a standalone Document with no UndoStack involved
+                names.remove(name); // the tool this name pointed to no longer exists, so leaving the stale mapping would let a LATER action wrongly reference a since-removed tool as if it still existed
+            }
+            Action::ModifyBasePoint { name, x, y } => {
+                // MODIFIES an existing ToolRecord's kind in place — it must
+                // never rebuild the Document from scratch or lose any
+                // other unrelated ToolRecord already in history.
+                let id = resolve_name(&names, name)?; // look up the referenced tool's id, or report exactly which name is missing
+                let current = document.get_tool(id).ok_or(ActionScriptError::Document(
+                    core_lib::DocumentError::ToolNotFound(id),
+                ))?; // defensive: `id` just came from `names`, which is always kept in sync with the Document
+                let core_lib::ToolKind::BasePoint {
+                    name: current_name,
+                    x: current_x,
+                    y: current_y,
+                } = &current.kind
+                else {
+                    // this name resolves to a tool of a different kind: refuse rather than silently misinterpreting it
+                    return Err(ActionScriptError::WrongToolType {
+                        name: name.clone(),
+                        expected: "BasePoint".to_string(),
+                        found: tool_kind_variant_name(&current.kind).to_string(),
+                    });
+                };
+                let new_kind = core_lib::ToolKind::BasePoint {
+                    name: current_name.clone(), // the name itself is never changed by this action
+                    x: x.unwrap_or(*current_x), // override only if the action provided a new x, otherwise keep the current value
+                    y: y.unwrap_or(*current_y), // same, for y: this is what lets a script move a point along just one axis
+                };
+                document.replace_tool_kind(id, new_kind)?; // propagate a Document-side validation failure via ActionScriptError::Document
+            }
+            Action::ModifyEndLine {
+                name,
+                angle_formula,
+                length_formula,
+            } => {
+                // MODIFIES an existing ToolRecord's kind in place — same
+                // "never rebuild from scratch" contract as ModifyBasePoint
+                // above.
+                let id = resolve_name(&names, name)?; // look up the referenced tool's id, or report exactly which name is missing
+                let current = document.get_tool(id).ok_or(ActionScriptError::Document(
+                    core_lib::DocumentError::ToolNotFound(id),
+                ))?; // defensive: `id` just came from `names`, which is always kept in sync with the Document
+                let core_lib::ToolKind::EndLine {
+                    name: current_name,
+                    base_point: current_base_point,
+                    angle_formula: current_angle_formula,
+                    length_formula: current_length_formula,
+                } = &current.kind
+                else {
+                    // this name resolves to a tool of a different kind: refuse rather than silently misinterpreting it
+                    return Err(ActionScriptError::WrongToolType {
+                        name: name.clone(),
+                        expected: "EndLine".to_string(),
+                        found: tool_kind_variant_name(&current.kind).to_string(),
+                    });
+                };
+                let new_kind = core_lib::ToolKind::EndLine {
+                    name: current_name.clone(), // the name itself is never changed by this action
+                    base_point: *current_base_point, // which point this is measured from is never changed by this action
+                    angle_formula: angle_formula
+                        .clone()
+                        .unwrap_or_else(|| current_angle_formula.clone()), // override only if the action provided a new angle formula, otherwise keep the current one
+                    length_formula: length_formula
+                        .clone()
+                        .unwrap_or_else(|| current_length_formula.clone()), // same, for the length formula
+                };
+                document.replace_tool_kind(id, new_kind)?; // propagate a Document-side validation failure via ActionScriptError::Document
+            }
         }
     }
 
@@ -324,6 +560,7 @@ mod tests {
     fn execute_action_script_builds_correct_geometry_from_named_references() {
         let script = ActionScript {
             measurements_path: None, // seeded directly on the Document below instead, for this inline test
+            load_pattern_path: None, // this test builds a document from scratch
             actions: vec![
                 Action::AddBasePoint {
                     name: "A".to_string(),
@@ -365,6 +602,7 @@ mod tests {
     fn action_referencing_undefined_name_is_reported() {
         let script = ActionScript {
             measurements_path: None,
+            load_pattern_path: None, // this test builds a document from scratch
             actions: vec![Action::AddEndLine {
                 name: "A1".to_string(),
                 base_point: "does_not_exist".to_string(),
@@ -383,6 +621,7 @@ mod tests {
     fn two_actions_defining_the_same_name_is_reported() {
         let script = ActionScript {
             measurements_path: None,
+            load_pattern_path: None, // this test builds a document from scratch
             actions: vec![
                 Action::AddBasePoint {
                     name: "A".to_string(),
@@ -455,5 +694,341 @@ mod tests {
 
         let err = load_action_script(&path).unwrap_err();
         assert!(matches!(err, ActionScriptError::Json(_)));
+    }
+
+    /// Writes `doc` out to a fresh temp-directory pattern XML file and
+    /// returns both the `TempDir` guard (the CALLER must keep it bound to a
+    /// named variable so the directory isn't deleted before the test uses
+    /// the path) and that file's path as a `String`, ready to plug straight
+    /// into `ActionScript::load_pattern_path`. Shared by every test below
+    /// that needs a small starting pattern to load.
+    fn write_pattern_to_tempfile(doc: &core_lib::Document) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap(); // the directory this pattern file lives in, kept alive by the caller
+        let path = dir.path().join("loaded.xml");
+        let xml = io::serialize_document(doc, None).unwrap();
+        std::fs::write(&path, xml).unwrap();
+        let path_string = path.to_string_lossy().into_owned(); // owned, so it doesn't borrow from `path`/`dir`
+        (dir, path_string)
+    }
+
+    #[test]
+    fn load_pattern_path_preserves_loaded_point_and_adds_a_new_one() {
+        let mut loaded_doc = core_lib::Document::default();
+        let loaded_id = loaded_doc.add_base_point("Existing", 3.0, 4.0); // the point this test proves survives untouched
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![Action::AddBasePoint {
+                name: "New".to_string(),
+                x: 1.0,
+                y: 1.0,
+            }],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        assert_eq!(document.history().len(), 2); // the loaded point plus the newly added one
+
+        // the loaded point's ORIGINAL id and kind are preserved exactly
+        let preserved = document.get_tool(loaded_id).unwrap();
+        assert_eq!(
+            preserved.kind,
+            core_lib::ToolKind::BasePoint {
+                name: "Existing".to_string(),
+                x: 3.0,
+                y: 4.0,
+            }
+        );
+
+        let new_tool = document
+            .history()
+            .iter()
+            .find(
+                |r| matches!(&r.kind, core_lib::ToolKind::BasePoint { name, .. } if name == "New"),
+            )
+            .unwrap();
+        assert!(
+            matches!(&new_tool.kind, core_lib::ToolKind::BasePoint { x, y, .. } if *x == 1.0 && *y == 1.0)
+        );
+    }
+
+    #[test]
+    fn actions_can_reference_a_loaded_points_original_name() {
+        let mut loaded_doc = core_lib::Document::default();
+        loaded_doc.add_base_point("A", 0.0, 0.0); // never redefined by the script below
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![Action::AddEndLine {
+                name: "A1".to_string(),
+                base_point: "A".to_string(), // resolves against the LOADED document's name index
+                angle_formula: "0".to_string(),
+                length_formula: "10".to_string(),
+            }],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let data = core_lib::recompute_all(&document).unwrap();
+        let a1_id = document
+            .history()
+            .iter()
+            .find(|r| matches!(&r.kind, core_lib::ToolKind::EndLine { name, .. } if name == "A1"))
+            .unwrap()
+            .id;
+        let point = data.get_point(a1_id).unwrap();
+        assert!((point.x - 10.0).abs() < 1e-9); // angle 0, length 10, from A (0,0)
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn remove_tool_removes_only_the_named_tool() {
+        let mut loaded_doc = core_lib::Document::default();
+        let a = loaded_doc.add_base_point("A", 0.0, 0.0); // to be removed
+        let b = loaded_doc.add_base_point("B", 1.0, 1.0); // unrelated, unconnected: must survive untouched
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![Action::RemoveTool {
+                name: "A".to_string(),
+            }],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        assert!(document.get_tool(a).is_none()); // A is genuinely gone
+        assert!(!document
+            .history()
+            .iter()
+            .any(|r| matches!(&r.kind, core_lib::ToolKind::BasePoint { name, .. } if name == "A")));
+
+        // B is completely unaffected: same id, same kind data as before
+        let preserved_b = document.get_tool(b).unwrap();
+        assert_eq!(
+            preserved_b.kind,
+            core_lib::ToolKind::BasePoint {
+                name: "B".to_string(),
+                x: 1.0,
+                y: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn remove_tool_still_referenced_fails_as_a_document_error_and_leaves_document_unchanged() {
+        let mut loaded_doc = core_lib::Document::default();
+        let a = loaded_doc.add_base_point("A", 0.0, 0.0);
+        let a1 = loaded_doc.add_end_line("A1", a, "0", "10").unwrap(); // depends on A, blocking its removal
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let failing_script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path.clone()),
+            actions: vec![Action::RemoveTool {
+                name: "A".to_string(),
+            }],
+        };
+        let err = execute_action_script(&failing_script).unwrap_err();
+        assert!(matches!(
+            err,
+            ActionScriptError::Document(core_lib::DocumentError::ToolInUse { id, used_by })
+                if id == a && used_by == a1
+        ));
+
+        // execute_action_script never writes to disk, and Document::remove_tool
+        // is proven atomic (document.rs's own tests) — so a completely fresh
+        // load of the same file, with no actions at all, reflects exactly the
+        // same state the failed script's Document was in right before its one
+        // (rejected) action: reloading it here and comparing against the
+        // originally-built loaded_doc proves nothing was left half-mutated.
+        let reload_only_script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![],
+        };
+        let reloaded = execute_action_script(&reload_only_script).unwrap();
+        assert_eq!(reloaded.history(), loaded_doc.history());
+    }
+
+    #[test]
+    fn modify_base_point_overrides_only_the_provided_axis() {
+        let mut loaded_doc = core_lib::Document::default();
+        let a = loaded_doc.add_base_point("A", 0.0, 0.0);
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![Action::ModifyBasePoint {
+                name: "A".to_string(),
+                x: Some(5.0), // overridden
+                y: None,      // kept as-is
+            }],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        let tool = document.get_tool(a).unwrap(); // same id as before the modification
+        assert_eq!(
+            tool.kind,
+            core_lib::ToolKind::BasePoint {
+                name: "A".to_string(),
+                x: 5.0,
+                y: 0.0, // unchanged from its original value
+            }
+        );
+    }
+
+    #[test]
+    fn modify_base_point_on_a_non_base_point_is_reported_as_wrong_tool_type() {
+        let mut loaded_doc = core_lib::Document::default();
+        let a = loaded_doc.add_base_point("A", 0.0, 0.0);
+        loaded_doc.add_end_line("B", a, "0", "10").unwrap(); // "B" is an EndLine, not a BasePoint
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![Action::ModifyBasePoint {
+                name: "B".to_string(),
+                x: Some(1.0),
+                y: None,
+            }],
+        };
+
+        let err = execute_action_script(&script).unwrap_err();
+        match err {
+            ActionScriptError::WrongToolType {
+                name,
+                expected,
+                found,
+            } => {
+                assert_eq!(name, "B");
+                assert_eq!(expected, "BasePoint");
+                assert_eq!(found, "EndLine");
+            }
+            other => panic!("expected WrongToolType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn modify_end_line_overrides_only_the_provided_formula() {
+        let mut loaded_doc = core_lib::Document::default();
+        let a = loaded_doc.add_base_point("A", 0.0, 0.0);
+        let b = loaded_doc.add_end_line("B", a, "0", "10").unwrap();
+        let (_dir, pattern_path) = write_pattern_to_tempfile(&loaded_doc); // `_dir` must stay bound: dropping it would delete the file `pattern_path` names
+
+        let script = ActionScript {
+            measurements_path: None,
+            load_pattern_path: Some(pattern_path),
+            actions: vec![Action::ModifyEndLine {
+                name: "B".to_string(),
+                angle_formula: None,                    // kept as-is
+                length_formula: Some("20".to_string()), // overridden
+            }],
+        };
+
+        let document = execute_action_script(&script).unwrap();
+        assert!(document.get_tool(b).is_some()); // still present under its ORIGINAL id, not removed and re-added under a new one
+        let data = core_lib::recompute_all(&document).unwrap();
+        let point = data.get_point(b).unwrap();
+        assert!((point.x - 20.0).abs() < 1e-9); // angle 0 (unchanged), length 20 (overridden), from A (0,0)
+        assert!((point.y - 0.0).abs() < 1e-9);
+    }
+
+    // THE key end-to-end test for this whole feature: an "L" shape (two
+    // legs, an open corner) loaded from a fixture file, then turned into a
+    // closed rectangle purely by ADDING a fourth point and two closing
+    // edges — never by deleting and redrawing the original shape.
+    #[test]
+    fn loading_l_shape_and_applying_l_to_rectangle_script_closes_it_additively() {
+        // CARGO_MANIFEST_DIR is crates/cli at compile time; fixtures live at
+        // the workspace root, two levels up — same convention as this
+        // module's other fixture-based test above.
+        let fixtures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let pattern_path = fixtures_dir.join("patterns/l_shape.xml");
+        let script_path = fixtures_dir.join("actions/l_to_rectangle.json");
+
+        let mut script = load_action_script(&script_path).unwrap();
+        // Rewritten to an absolute path for the same cwd-relative-resolution
+        // reason load_action_script_from_fixture_recomputes_to_correct_coordinates
+        // rewrites measurements_path above: `cargo test`'s default working
+        // directory is this crate's own manifest directory, not the
+        // workspace root the fixture's relative load_pattern_path assumes.
+        script.load_pattern_path = Some(pattern_path.to_string_lossy().into_owned());
+
+        let document = execute_action_script(&script).unwrap();
+        // 5 original records (A, B, C, line A-B, line B-C) + 3 new ones (D,
+        // line C-D, line D-A) = 8.
+        assert_eq!(document.history().len(), 8);
+
+        // Every ORIGINAL record survives with an IDENTICAL id and kind,
+        // proven by loading the raw fixture completely independently (no
+        // script involved at all) and comparing each of its records
+        // directly against the corresponding one in the script-modified
+        // Document.
+        let raw_xml = std::fs::read_to_string(&pattern_path).unwrap();
+        let (raw_l_shape, _measurements_path) = io::deserialize_document(&raw_xml).unwrap();
+        for original_record in raw_l_shape.history() {
+            let modified_record = document.get_tool(original_record.id).unwrap();
+            assert_eq!(&modified_record.kind, &original_record.kind);
+        }
+
+        let data = core_lib::recompute_all(&document).unwrap();
+
+        let point_id = |name: &str| {
+            document
+                .history()
+                .iter()
+                .find(|r| tool_name(&r.kind) == Some(name))
+                .unwrap()
+                .id
+        };
+        let a = data.get_point(point_id("A")).unwrap();
+        let b = data.get_point(point_id("B")).unwrap();
+        let c = data.get_point(point_id("C")).unwrap();
+        let d = data.get_point(point_id("D")).unwrap();
+
+        let close =
+            |x: f64, y: f64, px: f64, py: f64| (x - px).abs() < 1e-9 && (y - py).abs() < 1e-9; // shared coordinate-comparison helper for every check below
+
+        assert!(close(a.x, a.y, 0.0, 0.0));
+        assert!(close(b.x, b.y, 10.0, 0.0));
+        assert!(close(c.x, c.y, 10.0, 5.0));
+        assert!(close(d.x, d.y, 0.0, 5.0));
+
+        // Exactly 4 resolved lines, together tracing the rectangle's full
+        // perimeter — checked by coordinates, not assuming any particular
+        // ordering among them.
+        let resolved_edges: Vec<((f64, f64), (f64, f64))> = data
+            .objects()
+            .filter_map(|(_, object)| match object {
+                core_lib::GeoObject::Line(line) => {
+                    let p1 = data.get_point(line.p1).unwrap();
+                    let p2 = data.get_point(line.p2).unwrap();
+                    Some(((p1.x, p1.y), (p2.x, p2.y)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(resolved_edges.len(), 4);
+
+        let expected_edges = [
+            ((0.0, 0.0), (10.0, 0.0)),  // A-B
+            ((10.0, 0.0), (10.0, 5.0)), // B-C
+            ((10.0, 5.0), (0.0, 5.0)),  // C-D
+            ((0.0, 5.0), (0.0, 0.0)),   // D-A
+        ];
+        for (expected_p1, expected_p2) in expected_edges {
+            let found = resolved_edges.iter().any(|&(p1, p2)| {
+                (close(p1.0, p1.1, expected_p1.0, expected_p1.1)
+                    && close(p2.0, p2.1, expected_p2.0, expected_p2.1))
+                    || (close(p1.0, p1.1, expected_p2.0, expected_p2.1)
+                        && close(p2.0, p2.1, expected_p1.0, expected_p1.1))
+            }); // either endpoint order counts as the same edge
+            assert!(found, "missing edge {expected_p1:?}-{expected_p2:?}");
+        }
     }
 }

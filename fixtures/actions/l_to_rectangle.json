@@ -1,0 +1,8 @@
+{
+  "load_pattern_path": "fixtures/patterns/l_shape.xml",
+  "actions": [
+    { "op": "add_end_line", "name": "D", "base_point": "C", "angle_formula": "180", "length_formula": "10" },
+    { "op": "add_line", "p1": "C", "p2": "D" },
+    { "op": "add_line", "p1": "D", "p2": "A" }
+  ]
+}

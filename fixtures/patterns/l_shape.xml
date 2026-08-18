@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pattern>
+  <version>0.1</version>
+  <unit>cm</unit>
+  <history>
+    <point type="basePoint" id="1" name="A" x="0" y="0"/>
+    <point type="endLine" id="2" name="B" basePoint="1" angle="0" length="10"/>
+    <point type="endLine" id="3" name="C" basePoint="2" angle="90" length="5"/>
+    <line id="4" firstPoint="1" secondPoint="2"/>
+    <line id="5" firstPoint="2" secondPoint="3"/>
+  </history>
+</pattern>

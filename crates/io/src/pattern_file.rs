@@ -4,7 +4,7 @@ use quick_xml::events::{BytesDecl, BytesStart, BytesText, Event}; // the specifi
 use quick_xml::Writer; // the XML writer this module wraps
 use thiserror::Error; // brings in the Error derive macro used below
 
-use core_lib::{Document, ObjectId, ToolKind, ToolRecord}; // the Document types this module serializes to/from XML
+use core_lib::{Document, ObjectId, PieceNode, ToolKind, ToolRecord}; // the Document types this module serializes to/from XML
 
 /// Everything that can go wrong saving or loading a pattern file.
 #[derive(Debug, Error)] // Debug: printable in test failures; Error: implements std::error::Error via thiserror
@@ -236,8 +236,55 @@ fn write_tool_record(writer: &mut Writer<Vec<u8>>, record: &ToolRecord) -> std::
                 .with_attribute(("secondPoint", p2.raw().to_string().as_str())) // the segment's second endpoint
                 .write_empty()?; // no formula fields: Midpoint is pure geometry
         }
+        ToolKind::Piece {
+            name,
+            nodes,
+            seam_allowance_formula,
+        } => {
+            // The first tool type in this file format with CHILD elements
+            // rather than being a single flat self-closing tag: <piece>
+            // carries its own id/name/seamAllowance as attributes, same as
+            // every other tool, but its ordered node list can't fit into
+            // attributes on one element, so each node becomes its own
+            // nested <node/> child, in the same order as `nodes`.
+            writer
+                .create_element("piece")
+                .with_attribute(("id", record.id.raw().to_string().as_str())) // this tool's own id
+                .with_attribute(("name", name.as_str())) // the piece's user-facing label
+                .with_attribute(("seamAllowance", seam_allowance_formula.as_str())) // the FORMULA STRING, not a resolved number
+                .write_inner_content(|writer| {
+                    for node in nodes {
+                        // one <node/> per boundary vertex, in the exact order `nodes` stores them
+                        writer
+                            .create_element("node")
+                            .with_attribute(("point", node.point.raw().to_string().as_str())) // which existing point this vertex references
+                            .with_attribute((
+                                "excluded",
+                                if node.excluded_from_seam_allowance {
+                                    "true" // written as a plain "true"/"false" string, parsed back the same way on read
+                                } else {
+                                    "false"
+                                },
+                            ))
+                            .write_empty()?; // a self-closing <node .../>: no further nesting needed
+                    }
+                    Ok(())
+                })?;
+        }
     }
     Ok(()) // this record's element was written successfully
+}
+
+/// Accumulates a `<piece>` element's own attributes plus its `<node>`
+/// children while `deserialize_document` is reading between the `<piece>`
+/// start tag and its matching `</piece>` end tag — the first element in
+/// this format with nested child content rather than being fully
+/// self-describing from its own attributes alone.
+struct PendingPiece {
+    id: ObjectId,                   // this tool's own id, from <piece id="...">
+    name: String,                   // the piece's user-facing label
+    seam_allowance_formula: String, // the seam-allowance formula string, unevaluated
+    nodes: Vec<PieceNode>,          // every <node/> seen so far, in document order
 }
 
 /// Parses `xml` back into a [`Document`] plus whatever `<measurementsPath>`
@@ -248,9 +295,10 @@ fn write_tool_record(writer: &mut Writer<Vec<u8>>, record: &ToolRecord) -> std::
 pub fn deserialize_document(xml: &str) -> Result<(Document, Option<String>), PatternFileError> {
     let mut reader = quick_xml::Reader::from_str(xml); // a reader over the in-memory XML text, borrowing directly from `xml` (no intermediate buffer needed)
 
-    let mut history: Vec<ToolRecord> = Vec::new(); // accumulates tool records as <point>/<line> elements are encountered, in document order
+    let mut history: Vec<ToolRecord> = Vec::new(); // accumulates tool records as <point>/<line>/<piece> elements are encountered, in document order
     let mut measurements_path: Option<String> = None; // set once (if ever) a <measurementsPath> element's text content is read
     let mut awaiting_measurements_path_text = false; // true right after a <measurementsPath> start tag, until its Text event (if any) is consumed
+    let mut pending_piece: Option<PendingPiece> = None; // Some(..) while inside a <piece>...</piece> element, accumulating its child <node> elements
 
     loop {
         // pull XML events one at a time until Eof or a parse error
@@ -259,7 +307,7 @@ pub fn deserialize_document(xml: &str) -> Result<(Document, Option<String>), Pat
             Event::Eof => break, // reached the end of the document: stop reading
             Event::Start(start) | Event::Empty(start) => {
                 // Start and Empty (self-closing) tags carry the same attribute data; this format only ever
-                // uses Empty for <point>/<line>, but both are accepted here in case a file writes them otherwise
+                // uses Empty for <point>/<line>/<node>, but both are accepted here in case a file writes them otherwise
                 awaiting_measurements_path_text = false; // reset any pending capture from a previous, textless <measurementsPath/> before starting a new element
                 let tag = String::from_utf8_lossy(start.name().as_ref()).into_owned(); // this element's tag name, for error messages and dispatch below
                 match tag.as_str() {
@@ -270,6 +318,36 @@ pub fn deserialize_document(xml: &str) -> Result<(Document, Option<String>), Pat
                     "line" => {
                         let record = parse_line(&start)?; // parse id/firstPoint/secondPoint attributes into a ToolRecord
                         history.push(record); // record it in document order
+                    }
+                    "piece" => {
+                        let attrs = read_attributes(&start)?; // collect this <piece>'s own attributes (id/name/seamAllowance)
+                        let id = parse_id("piece", &attrs, "id")?; // this tool's own id
+                        let name = require_attr("piece", &attrs, "name")?.to_string(); // the piece's user-facing label
+                        let seam_allowance_formula =
+                            require_attr("piece", &attrs, "seamAllowance")?.to_string(); // the seam-allowance formula string, unevaluated
+                        pending_piece = Some(PendingPiece {
+                            id,
+                            name,
+                            seam_allowance_formula,
+                            nodes: Vec::new(), // filled in as each child <node/> is encountered below
+                        }); // start accumulating; finalized into a ToolRecord on the matching </piece>, handled in the Event::End arm below
+                    }
+                    "node" => {
+                        let attrs = read_attributes(&start)?; // collect this <node>'s own attributes (point/excluded)
+                        let point = parse_id("node", &attrs, "point")?; // which existing point this boundary vertex references
+                        let excluded_value = require_attr("node", &attrs, "excluded")?; // the raw "true"/"false" text, as written by the serializer
+                        let excluded_from_seam_allowance = excluded_value == "true"; // anything other than exactly "true" is treated as "false", matching the only two values the writer ever produces
+                        if let Some(piece) = pending_piece.as_mut() {
+                            // a <node> is only meaningful inside a <piece>; append it to whichever piece is currently open
+                            piece.nodes.push(PieceNode {
+                                point,
+                                excluded_from_seam_allowance,
+                            });
+                        }
+                        // A <node> outside any <piece> is malformed input this
+                        // parser doesn't reject: it's silently dropped, matching
+                        // this parser's existing tolerance for unrecognized/
+                        // out-of-place elements elsewhere in this same loop.
                     }
                     "measurementsPath" => {
                         awaiting_measurements_path_text = true; // the very next Text event (if any) is this element's path value
@@ -282,6 +360,26 @@ pub fn deserialize_document(xml: &str) -> Result<(Document, Option<String>), Pat
                         // later phases without breaking older parser code,
                         // as long as those new elements aren't load-bearing
                         // for what this phase reads.
+                    }
+                }
+            }
+            Event::End(end) => {
+                // Only <piece> needs end-tag handling in this format: every
+                // other element this parser understands is self-closing
+                // (Empty), so its End event (if any, e.g. </history>) never
+                // needs to trigger anything.
+                let tag = String::from_utf8_lossy(end.name().as_ref()).into_owned(); // this closing element's tag name
+                if tag == "piece" {
+                    if let Some(piece) = pending_piece.take() {
+                        // this </piece> matches the <piece> that opened `pending_piece`: finalize it into a ToolRecord
+                        history.push(ToolRecord {
+                            id: piece.id, // the id captured when <piece> was opened
+                            kind: ToolKind::Piece {
+                                name: piece.name,   // the label captured when <piece> was opened
+                                nodes: piece.nodes, // every <node/> accumulated while this piece was open, in document order
+                                seam_allowance_formula: piece.seam_allowance_formula, // the formula string captured when <piece> was opened
+                            },
+                        });
                     }
                 }
             }
@@ -772,6 +870,65 @@ mod tests {
             recompute_all(&original).unwrap(),
             recompute_all(&restored).unwrap()
         );
+    }
+
+    #[test]
+    fn piece_round_trip_preserves_recompute_result_and_node_order_and_excluded_flags() {
+        let mut original = Document::default();
+        let a = original.add_base_point("A", 0.0, 0.0);
+        let b = original.add_base_point("B", 10.0, 0.0);
+        let c = original.add_base_point("C", 0.0, 10.0);
+        original
+            .add_piece(
+                "Piece1",
+                vec![
+                    PieceNode {
+                        point: a,
+                        excluded_from_seam_allowance: true, // at least one node excluded, per this test's requirement
+                    },
+                    PieceNode {
+                        point: b,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: c,
+                        excluded_from_seam_allowance: false,
+                    },
+                ],
+                "1.0",
+            )
+            .unwrap();
+
+        let xml = serialize_document(&original, None).unwrap();
+        let (restored, _path) = deserialize_document(&xml).unwrap();
+
+        assert_eq!(
+            recompute_all(&original).unwrap(),
+            recompute_all(&restored).unwrap()
+        );
+
+        // Node order and each node's excluded flag must survive exactly, not just the resolved geometry.
+        let original_piece = original
+            .history()
+            .iter()
+            .find(|r| matches!(r.kind, ToolKind::Piece { .. }))
+            .unwrap();
+        let restored_piece = restored
+            .history()
+            .iter()
+            .find(|r| matches!(r.kind, ToolKind::Piece { .. }))
+            .unwrap();
+        match (&original_piece.kind, &restored_piece.kind) {
+            (
+                ToolKind::Piece { nodes: orig, .. },
+                ToolKind::Piece {
+                    nodes: restored, ..
+                },
+            ) => {
+                assert_eq!(orig, restored);
+            }
+            _ => panic!("expected ToolKind::Piece on both sides"),
+        }
     }
 
     #[test]

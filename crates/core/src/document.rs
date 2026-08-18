@@ -76,6 +76,7 @@ fn references_of(kind: &ToolKind) -> Vec<ObjectId> {
             ..
         } => vec![*point, *line_p1, *line_p2], // depends on the projected point plus both points defining the line
         ToolKind::Midpoint { p1, p2, .. } => vec![*p1, *p2], // depends on both segment endpoints
+        ToolKind::Piece { nodes, .. } => nodes.iter().map(|node| node.point).collect(), // every point still used as a piece boundary vertex, so remove_tool correctly blocks deleting any of them
     }
 }
 
@@ -96,6 +97,20 @@ pub struct ToolRecord {
 // later phases — the intersection/curve/transform tools involve
 // multi-solution ambiguity or new GeoObject variants that are explicitly
 // out of scope for Phase 10a.
+/// One boundary vertex in a [`ToolKind::Piece`]'s ordered node list: which
+/// existing point it references, and whether that vertex's adjacent edges
+/// should be excluded from seam-allowance offsetting.
+///
+/// `excluded_from_seam_allowance` is READ but not yet acted upon by
+/// [`crate::recompute::recompute_all`]'s `Piece` arm in this phase — see
+/// that arm's own doc comment for why proper per-edge exclusion is a
+/// future refinement.
+#[derive(Debug, Clone, PartialEq)] // same rationale as ToolRecord/ToolKind's derives above
+pub struct PieceNode {
+    pub point: ObjectId, // the existing point this boundary vertex references
+    pub excluded_from_seam_allowance: bool, // whether this vertex's adjacent edges should be excluded from offsetting (not yet implemented; see the doc comment above)
+}
+
 /// The kind of a [`ToolRecord`], carrying whatever inputs that tool needs
 /// to produce its geometry. Phase 10a adds the five single-point
 /// construction tools (`AlongLine`/`Normal`/`Bisector`/`Height`/
@@ -187,6 +202,18 @@ pub enum ToolKind {
         name: String, // the point's user-facing label
         p1: ObjectId, // the segment's first endpoint
         p2: ObjectId, // the segment's second endpoint
+    },
+
+    /// A closed straight-line boundary built from existing points, plus a
+    /// formula controlling how far (if at all) that boundary is offset
+    /// outward into a seam allowance on recompute. A deliberately
+    /// simplified subset of Seamly2D's `VPiecePath`: straight edges only
+    /// (no curve/spline boundary segments), no notch generation — see this
+    /// phase's own scope note.
+    Piece {
+        name: String,                   // the piece's user-facing label
+        nodes: Vec<PieceNode>, // the boundary vertices, in order, each referencing an existing point
+        seam_allowance_formula: String, // a formula string evaluating to the seam-allowance width; 0.0 means no seam allowance
     },
 }
 
@@ -532,6 +559,36 @@ impl Document {
             p1,
             p2,
         }; // both endpoints validated above
+        Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
+    }
+
+    /// Adds a piece contour built from `nodes`, each referencing an
+    /// existing point by id, with `seam_allowance_formula` controlling how
+    /// far (if at all) the contour is offset outward on recompute.
+    ///
+    /// Same "validate immediately, only register on success" contract as
+    /// every other `add_*` constructor: every node's `point` id is checked
+    /// against this Document's known ids *before* anything is appended to
+    /// `history`, in node order, so the first missing one is reported and
+    /// nothing is mutated on failure.
+    pub fn add_piece(
+        &mut self,
+        name: impl Into<String>,
+        nodes: Vec<PieceNode>,
+        seam_allowance_formula: impl Into<String>,
+    ) -> Result<ObjectId, crate::PatternError> {
+        for node in &nodes {
+            // check every referenced point before touching history, in node order
+            if !self.contains(node.point) {
+                // this node's point isn't a real id from this Document: refuse before touching history
+                return Err(crate::PatternError::MissingDependency(node.point)); // precise, actionable error naming the first missing node's point
+            }
+        }
+        let kind = ToolKind::Piece {
+            name: name.into(), // convert the caller's name into an owned String
+            nodes,             // every node already validated above
+            seam_allowance_formula: seam_allowance_formula.into(), // convert the caller's formula into an owned String
+        };
         Ok(self.add_tool(kind)) // validation passed: register the tool and hand back its id
     }
 
@@ -1156,6 +1213,79 @@ mod tests {
 
         let err = doc.remove_tool(a).unwrap_err();
         assert_eq!(err, DocumentError::ToolInUse { id: a, used_by: n });
+        assert!(doc.contains(a)); // the failed removal changed nothing
+    }
+
+    #[test]
+    fn add_piece_with_unknown_point_fails_without_mutating_history() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let bogus = ObjectId::new(9999); // never produced by this Document
+
+        let len_before = doc.history().len();
+        let err = doc
+            .add_piece(
+                "Piece1",
+                vec![
+                    PieceNode {
+                        point: a,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: bogus,
+                        excluded_from_seam_allowance: false,
+                    },
+                ],
+                "1.0",
+            )
+            .unwrap_err();
+        let len_after = doc.history().len();
+
+        assert_eq!(err, PatternError::MissingDependency(bogus));
+        assert_eq!(len_before, len_after);
+    }
+
+    // Point `a` is used both directly (in a Line) and as a Piece boundary
+    // vertex. The Piece is added FIRST, so it's the record `remove_tool`
+    // encounters first in its history scan — this is what actually proves
+    // `references_of` was correctly extended for `Piece`, rather than the
+    // removal merely being blocked by the (also-present) Line dependency.
+    #[test]
+    fn remove_tool_blocked_by_a_piece_nodes_dependency() {
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 10.0, 0.0);
+        let c = doc.add_base_point("C", 0.0, 10.0);
+        let piece = doc
+            .add_piece(
+                "Piece1",
+                vec![
+                    PieceNode {
+                        point: a,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: b,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: c,
+                        excluded_from_seam_allowance: false,
+                    },
+                ],
+                "1.0",
+            )
+            .unwrap(); // added before the line below, so the piece is found first during remove_tool's scan
+        doc.add_line(a, b).unwrap(); // `a` is ALSO used directly here, matching the "used both ways" scenario
+
+        let err = doc.remove_tool(a).unwrap_err();
+        assert_eq!(
+            err,
+            DocumentError::ToolInUse {
+                id: a,
+                used_by: piece
+            }
+        );
         assert!(doc.contains(a)); // the failed removal changed nothing
     }
 }

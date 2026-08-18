@@ -2,7 +2,7 @@ use thiserror::Error; // brings in the `Error` derive macro used by `PatternErro
 
 use crate::document::{Document, ToolKind}; // the ordered tool history this module walks
 use crate::formula::{eval_formula, flatten_variables}; // Phase 2's formula pipeline, used by EndLine
-use crate::{ContainerError, GeoObject, LineData, ObjectId, PatternData, PointData}; // Phase 1's container and geometry types
+use crate::{ContainerError, GeoObject, LineData, ObjectId, PatternData, PieceData, PointData}; // Phase 1's container and geometry types
 
 /// Everything that can go wrong turning a [`Document`] into a resolved
 /// [`PatternData`].
@@ -250,6 +250,36 @@ pub fn recompute_all(doc: &Document) -> Result<PatternData, PatternError> {
                 let y = (point1.y + point2.y) / 2.0; // the midpoint's y coordinate
                 let point = GeoObject::Point(PointData { x, y }); // the resolved point for this tool
                 data.insert_with_id(record.id, point)?; // place it under this tool's assigned id
+            }
+            ToolKind::Piece {
+                nodes,
+                seam_allowance_formula,
+                ..
+            } => {
+                let mut contour = Vec::with_capacity(nodes.len()); // accumulates each node's resolved (x, y) coordinates, in node order
+                for node in nodes {
+                    // resolve every boundary vertex's point, in node order
+                    let resolved = resolve_point(&data, node.point)?; // reuses the same missing-dependency mapping every other arm relies on
+                    contour.push((resolved.x, resolved.y)); // collect just the coordinates; the node's id/exclusion flag aren't part of the resolved contour itself
+                }
+                let vars = flatten_variables(&data); // snapshot every variable resolved so far, for the seam-allowance formula to reference
+                let width = eval_formula(seam_allowance_formula, &vars)?; // evaluate the seam-allowance width formula
+                                                                          // NOTE: `node.excluded_from_seam_allowance` is not consulted here — every
+                                                                          // edge is always offset regardless of the flag. Properly respecting
+                                                                          // per-edge exclusion would require `offset_polygon` to accept a
+                                                                          // per-edge inclusion mask rather than always offsetting every edge,
+                                                                          // which is out of scope for this phase (see the module's scope note);
+                                                                          // this is a TODO for a future refinement.
+                let seam_allowance = if width == 0.0 {
+                    None // a zero-width seam allowance means no offset polygon to compute
+                } else {
+                    Some(crate::geometry::offset_polygon(&contour, width)?) // propagate any degenerate-geometry failure via ?
+                };
+                let piece = GeoObject::Piece(PieceData {
+                    contour,
+                    seam_allowance,
+                }); // the resolved piece for this tool
+                data.insert_with_id(record.id, piece)?; // place it under this tool's assigned id
             }
         }
     }
@@ -519,5 +549,97 @@ mod tests {
         assert!((point_after.x - 8.0).abs() < 1e-9);
         assert!((point_after.y - 0.0).abs() < 1e-9);
         assert_ne!(point_before, point_after); // the resolved geometry actually changed
+    }
+
+    // Cross-checks the two code paths against each other: the Piece tool's
+    // resolved contour/seam_allowance must match calling
+    // crate::geometry::offset_polygon directly on the same input points.
+    #[test]
+    fn piece_contour_and_seam_allowance_match_offset_polygon_directly() {
+        use crate::document::PieceNode;
+
+        let mut doc = Document::default();
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 10.0, 0.0);
+        let c = doc.add_base_point("C", 0.0, 10.0);
+        let piece = doc
+            .add_piece(
+                "Piece1",
+                vec![
+                    PieceNode {
+                        point: a,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: b,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: c,
+                        excluded_from_seam_allowance: false,
+                    },
+                ],
+                "1.0",
+            )
+            .unwrap();
+
+        let data = recompute_all(&doc).unwrap();
+        let resolved = data.get_piece(piece).unwrap();
+
+        let expected_contour = vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)];
+        assert_eq!(resolved.contour, expected_contour);
+
+        let expected_offset = crate::geometry::offset_polygon(&expected_contour, 1.0).unwrap();
+        assert_eq!(resolved.seam_allowance, Some(expected_offset));
+    }
+
+    #[test]
+    fn piece_seam_allowance_formula_reacts_to_measurement_changes() {
+        use crate::document::PieceNode;
+
+        let mut doc = Document::default();
+        doc.set_variable("seam_width", Variable::Measurement { value: 1.0 });
+        let a = doc.add_base_point("A", 0.0, 0.0);
+        let b = doc.add_base_point("B", 10.0, 0.0);
+        let c = doc.add_base_point("C", 0.0, 10.0);
+        let piece = doc
+            .add_piece(
+                "Piece1",
+                vec![
+                    PieceNode {
+                        point: a,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: b,
+                        excluded_from_seam_allowance: false,
+                    },
+                    PieceNode {
+                        point: c,
+                        excluded_from_seam_allowance: false,
+                    },
+                ],
+                "seam_width",
+            )
+            .unwrap();
+
+        let before = recompute_all(&doc).unwrap();
+        let sa_before = before
+            .get_piece(piece)
+            .unwrap()
+            .seam_allowance
+            .clone()
+            .unwrap();
+
+        doc.set_variable("seam_width", Variable::Measurement { value: 2.0 });
+        let after = recompute_all(&doc).unwrap();
+        let sa_after = after
+            .get_piece(piece)
+            .unwrap()
+            .seam_allowance
+            .clone()
+            .unwrap();
+
+        assert_ne!(sa_before, sa_after);
     }
 }

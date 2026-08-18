@@ -26,6 +26,22 @@ pub struct LineData {
     pub p2: ObjectId,
 }
 
+/// A closed straight-line polygon boundary (a pattern "piece"), plus its
+/// optional seam-allowance offset.
+///
+/// `contour` is the resolved boundary point sequence, IN ORDER — the same
+/// "store resolved geometry, not formulas" contract every other
+/// `GeoObject` variant follows (the formula/reference inputs live on
+/// [`crate::document::ToolKind::Piece`] instead). `seam_allowance` is
+/// `None` when the width formula evaluates to `0.0` (no seam allowance
+/// requested), or `Some(offset points)` otherwise, computed by
+/// [`crate::geometry::offset_polygon`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PieceData {
+    pub contour: Vec<(f64, f64)>, // the boundary's resolved points, in order
+    pub seam_allowance: Option<Vec<(f64, f64)>>, // None if the seam-allowance width was 0.0, else Some(the offset boundary)
+}
+
 /// Any geometric object a [`crate::PatternData`] can store under an
 /// [`ObjectId`].
 ///
@@ -36,5 +52,6 @@ pub struct LineData {
 pub enum GeoObject {
     Point(PointData),
     Line(LineData),
+    Piece(PieceData),
     // TODO(phase 10): Arc, Spline, SplinePath, EllipticalArc
 }

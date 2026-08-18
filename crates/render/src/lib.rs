@@ -23,6 +23,16 @@ pub enum DrawCommand {
         x2: f64, // pattern-space x coordinate of the second endpoint
         y2: f64, // pattern-space y coordinate of the second endpoint
     },
+    /// A closed polygon outline — used for piece contours and their seam
+    /// allowances.
+    Polygon {
+        points: Vec<(f64, f64)>, // the polygon's vertices, in order, in pattern-space coordinates
+        // A rendering-style hint for the UI layer (the `app` crate) — e.g.
+        // whether to draw a filled shape versus an outline only. This
+        // crate makes no rendering-style decisions itself; it only carries
+        // the hint through from the source geometry.
+        filled: bool,
+    },
 }
 
 /// Everything that can go wrong turning a [`core_lib::PatternData`] into
@@ -80,6 +90,23 @@ pub fn render(data: &core_lib::PatternData) -> Result<Vec<DrawCommand>, RenderEr
                     y2: p2.y,
                 });
             }
+            core_lib::GeoObject::Piece(piece) => {
+                commands.push(DrawCommand::Polygon {
+                    points: piece.contour.clone(), // the piece's boundary, in order
+                    filled: false, // pieces are drawn as outlines in this phase; styling decisions belong to the UI layer
+                });
+                if let Some(sa_points) = &piece.seam_allowance {
+                    // Pushed immediately after the contour, in that fixed
+                    // order, so a UI layer consuming this list in order can
+                    // naturally style the seam allowance as an outer/
+                    // secondary outline without needing to inspect which
+                    // GeoObject each command came from.
+                    commands.push(DrawCommand::Polygon {
+                        points: sa_points.clone(), // the seam-allowance offset boundary, in order
+                        filled: false,
+                    });
+                }
+            }
         }
     }
 
@@ -89,7 +116,7 @@ pub fn render(data: &core_lib::PatternData) -> Result<Vec<DrawCommand>, RenderEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_lib::{GeoObject, LineData, PatternData, PointData};
+    use core_lib::{GeoObject, LineData, PatternData, PieceData, PointData};
 
     #[test]
     fn renders_a_point_and_a_line_with_correct_coordinates() {
@@ -185,5 +212,44 @@ mod tests {
 
         let err = render(&data).unwrap_err();
         assert_eq!(err, RenderError::DanglingReference(p1));
+    }
+
+    #[test]
+    fn render_of_a_piece_with_contour_and_seam_allowance_produces_two_polygons_in_order() {
+        let mut data = PatternData::default();
+        data.add_object(GeoObject::Piece(PieceData {
+            contour: vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)],
+            seam_allowance: Some(vec![(-1.0, -1.0), (11.0, -1.0), (-1.0, 11.0)]),
+        }));
+
+        let commands = render(&data).unwrap();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0],
+            DrawCommand::Polygon {
+                points: vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)],
+                filled: false,
+            }
+        );
+        assert_eq!(
+            commands[1],
+            DrawCommand::Polygon {
+                points: vec![(-1.0, -1.0), (11.0, -1.0), (-1.0, 11.0)],
+                filled: false,
+            }
+        );
+    }
+
+    #[test]
+    fn render_of_a_piece_with_no_seam_allowance_produces_one_polygon() {
+        let mut data = PatternData::default();
+        data.add_object(GeoObject::Piece(PieceData {
+            contour: vec![(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)],
+            seam_allowance: None,
+        }));
+
+        let commands = render(&data).unwrap();
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(commands[0], DrawCommand::Polygon { .. }));
     }
 }

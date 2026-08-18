@@ -92,6 +92,14 @@ fn commit_tool_kind(sync: &mut sync::PatternSync, kind: core_lib::ToolKind) {
                 undo_stack.do_add_height(doc, name, point, line_p1, line_p2)?; // propagate a validation failure, if any
                 Ok(())
             }
+            // Piece (Phase 12) has no toolbar entry point in this phase — no
+            // ToolKindSelector variant, and no click-to-draw state machine
+            // support — and `UndoStack` has no `do_add_piece` yet either;
+            // building pieces interactively is explicitly out of scope for
+            // Phase 12 (see its own scope note). Handled here anyway, as a
+            // no-op, purely so this match stays exhaustive against the
+            // shared `ToolKind` type rather than silently failing to build.
+            core_lib::ToolKind::Piece { .. } => Ok(()),
         }
     });
     if let Err(err) = result {
@@ -315,6 +323,26 @@ impl eframe::App for Yoko2DApp {
                                     ], // the segment's two screen endpoints
                                     egui::Stroke::new(2.0_f32, egui::Color32::WHITE), // a plain 2px white stroke; styling is out of scope for this phase
                                 );
+                            }
+                            render::DrawCommand::Polygon { points, .. } => {
+                                // `filled` is ignored here: this phase always draws an outline only,
+                                // matching Part F's own doc comment that this crate makes no styling decisions
+                                let screen_points: Vec<egui::Pos2> = points
+                                    .iter()
+                                    .map(|(x, y)| {
+                                        let (screen_x, screen_y) = self.camera.to_screen(*x, *y); // pattern space -> screen pixels, per vertex
+                                        egui::pos2(screen_x, screen_y)
+                                    })
+                                    .collect(); // every vertex converted, in the same order as the polygon's points
+                                let vertex_count = screen_points.len(); // needed to wrap the closing edge back to the first vertex
+                                for i in 0..vertex_count {
+                                    // draw every edge, including the wrap-around edge from the last vertex back to the first
+                                    let next_i = (i + 1) % vertex_count; // the next vertex's index, wrapping to 0 after the last
+                                    painter.line_segment(
+                                        [screen_points[i], screen_points[next_i]], // this edge's two screen endpoints
+                                        egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_BLUE), // a distinct stroke from plain construction lines, so piece outlines are visually distinguishable
+                                    );
+                                }
                             }
                         }
                     }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap; // ordered map for `objects`, see the field comm
 use std::collections::HashMap; // still used for `variables`, which has no ordering requirement
 
 use crate::error::ContainerError;
-use crate::geo::{GeoObject, LineData, PointData};
+use crate::geo::{GeoObject, LineData, PieceData, PointData};
 use crate::id::ObjectId;
 use crate::variable::{Variable, VariableKind};
 
@@ -106,6 +106,21 @@ impl PatternData {
                 expected: "Line",
             }),
             None => Err(ContainerError::ObjectNotFound(id)),
+        }
+    }
+
+    /// Looks up `id` expecting it to hold a [`PieceData`].
+    ///
+    /// Same not-found/wrong-type distinction as [`Self::get_point`]/
+    /// [`Self::get_line`], mirrored for the `Piece` variant.
+    pub fn get_piece(&self, id: ObjectId) -> Result<&PieceData, ContainerError> {
+        match self.objects.get(&id) {
+            Some(GeoObject::Piece(piece)) => Ok(piece), // id exists and holds a piece: exactly what the caller needs
+            Some(_) => Err(ContainerError::WrongObjectType {
+                id,
+                expected: "Piece",
+            }), // id exists but names something else, e.g. a Point or Line
+            None => Err(ContainerError::ObjectNotFound(id)), // no object at all under this id
         }
     }
 

@@ -16,6 +16,15 @@ struct Yoko2DApp {
     _watcher_handle: Option<watch::WatcherHandle>,
     events: Option<std::sync::mpsc::Receiver<watch::WatchEvent>>, // where debounced "measurement file changed" notifications arrive, if this instance is watching a file at all
     camera: camera::Camera, // pattern-space -> screen-pixel conversion state for this window
+    // Starts `false` so the very first frame that has a real canvas size
+    // available auto-fits `camera` to whatever geometry was opened (see
+    // `camera::fit_to_points`), rather than leaving the fixed
+    // `Camera::default()` in place — which only happens to be visible for
+    // one narrow range of pattern scales, and was the actual root cause of
+    // freshly-opened patterns rendering completely off-screen. Set to
+    // `true` right after that one-time fit, so a user's later pan/zoom
+    // (once implemented) isn't silently overwritten on every frame.
+    camera_fitted: bool,
     tool_controller: tool_controller::ToolController, // which construction tool is selected and its in-progress clicks (Phase 11)
     active_dialog: Option<tool_controller::PendingDialog>, // a formula dialog currently open, if any (Phase 11)
 }
@@ -291,9 +300,39 @@ impl eframe::App for Yoko2DApp {
         let draw_result = render::render(self.sync.current_data());
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Reserve the whole remaining area as both a click target and a paint surface.
-            let (response, painter) =
-                ui.allocate_painter(ui.available_size(), egui::Sense::click());
+            let available_size = ui.available_size(); // captured once, BEFORE allocate_painter reserves it below — needed both for the painter itself and for the camera auto-fit that follows
+                                                      // Reserve the whole remaining area as both a click target and a paint surface.
+            let (response, painter) = ui.allocate_painter(available_size, egui::Sense::click());
+
+            if !self.camera_fitted {
+                // One-time auto-fit: collect every currently-resolved point's
+                // coordinates (Lines/Pieces reference points that are
+                // already counted here, so nothing else needs including)
+                // and, if there's anything to fit to yet, replace the
+                // placeholder Camera::default() with one that actually
+                // centers this pattern in the real, now-known canvas size —
+                // this is what fixes freshly-opened geometry rendering
+                // completely off-screen. Deliberately re-checked every
+                // frame until it succeeds once (rather than only on frame
+                // one): a document opened with zero points yet (e.g. a
+                // blank pattern) has nothing to fit to until the user
+                // places a first point, at which point this still fires.
+                let points: Vec<(f64, f64)> = self
+                    .sync
+                    .current_data()
+                    .objects()
+                    .filter_map(|(_, object)| match object {
+                        core_lib::GeoObject::Point(point) => Some((point.x, point.y)), // only Points carry standalone coordinates; Lines/Pieces reference them, not duplicate them
+                        _ => None, // Lines and Pieces contribute no NEW coordinates beyond the Points they reference
+                    })
+                    .collect(); // materialize before borrowing self mutably below, since current_data() borrows self.sync immutably
+                if !points.is_empty() {
+                    // only fit (and lock in) once there's actually something real to fit to
+                    self.camera =
+                        camera::fit_to_points(&points, available_size.x, available_size.y); // center and scale the camera to this pattern's actual bounding box
+                    self.camera_fitted = true; // don't keep re-fitting every frame once this has succeeded, so later manual pan/zoom (once implemented) won't be silently overwritten
+                }
+            }
 
             if response.clicked() {
                 if let Some(screen_pos) = response.interact_pointer_pos() {
@@ -332,7 +371,14 @@ impl eframe::App for Yoko2DApp {
                                 painter.circle_filled(
                                     egui::pos2(screen_x, screen_y), // the point's screen position
                                     4.0_f32, // a small fixed radius, in pixels, regardless of zoom
-                                    egui::Color32::WHITE, // plain white fill; styling is out of scope for this phase
+                                    // Warm amber/gold rather than plain white: chosen to read clearly
+                                    // against the dark theme this window now always forces (see
+                                    // run_with_document's set_visuals call), and to be visually
+                                    // distinct from the light-gray line color just below, so points
+                                    // are easy to pick out at a glance — which also directly helps
+                                    // click-to-draw hit-testing feedback (Phase 11), since the user
+                                    // needs to clearly see which points exist to click on them.
+                                    egui::Color32::from_rgb(255, 200, 0),
                                 );
                             }
                             render::DrawCommand::Line { x1, y1, x2, y2 } => {
@@ -343,12 +389,27 @@ impl eframe::App for Yoko2DApp {
                                         egui::pos2(screen_x1, screen_y1),
                                         egui::pos2(screen_x2, screen_y2),
                                     ], // the segment's two screen endpoints
-                                    egui::Stroke::new(2.0_f32, egui::Color32::WHITE), // a plain 2px white stroke; styling is out of scope for this phase
+                                    egui::Stroke::new(
+                                        2.0_f32,
+                                        // A light, near-white gray rather than exact white: this keeps
+                                        // the clean, high-contrast construction-line look against the
+                                        // now-guaranteed-dark background, while staying visually
+                                        // distinguishable from the amber point markers above. Also
+                                        // deliberate: relying on the plain all-caps "pure white" egui
+                                        // color constant right next to an equally pure-white point/panel
+                                        // color was part of what made this bug's contrast collision easy
+                                        // to introduce unnoticed — any near-white color reads fine here
+                                        // without repeating that trap.
+                                        egui::Color32::from_rgb(220, 220, 220),
+                                    ),
                                 );
                             }
                             render::DrawCommand::Polygon { points, .. } => {
                                 // `filled` is ignored here: this phase always draws an outline only,
-                                // matching Part F's own doc comment that this crate makes no styling decisions
+                                // matching Part F's own doc comment that this crate makes no styling decisions.
+                                // Its existing egui::Color32::LIGHT_BLUE stroke (below) was already
+                                // clearly visible before this fix and needs no change here — this fix
+                                // targets only the two colors (Point/Line) that actually caused the bug.
                                 let screen_points: Vec<egui::Pos2> = points
                                     .iter()
                                     .map(|(x, y)| {
@@ -548,7 +609,33 @@ pub fn run_with_document(
         // eframe's own native error path — surfacing as this function's
         // own `Err(eframe::Error::AppCreation(..))` — instead of needing
         // to panic or invent a separate error-reporting mechanism.
-        Box::new(move |_cc| {
+        Box::new(move |cc| {
+            // Force a known, consistent theme rather than inheriting
+            // whatever the OS/system theme happens to be: egui's
+            // `theme_preference` defaults to `ThemePreference::System`, and
+            // this is exactly the class of bug that caused geometry to
+            // render invisibly — a color hardcoded to look good on one
+            // theme silently vanishes the moment the app runs on a system
+            // set to the opposite theme. Dark mode is chosen specifically
+            // because it gives the most reliable contrast against the
+            // light/bright geometry colors below, and matches the visual
+            // style most CAD-style tools use.
+            //
+            // `Context::set_visuals` alone (an earlier attempt at this same
+            // fix) does NOT actually force the theme: it only mutates the
+            // `Style` for whichever theme slot `Context::theme()` resolves
+            // to AT THE MOMENT IT'S CALLED. Since `theme_preference` is
+            // still `System` at that point, `theme()` still tracks the
+            // real OS theme on every later frame (once winit reports it),
+            // so a `set_visuals` call made against, say, the dark slot has
+            // no visible effect once the context switches to displaying
+            // the light slot instead — which is exactly why the previous
+            // attempt at this fix had no visible effect on a light-themed
+            // system. `Context::set_theme` is the actual fix: it sets
+            // `theme_preference` itself, so `theme()` always resolves to
+            // `Dark` regardless of what the OS reports, and egui's own
+            // built-in dark `Style` (already sensible) is what gets used.
+            cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
             let (sync, watcher_handle, events): (
                 sync::PatternSync,
                 Option<watch::WatcherHandle>,
@@ -579,7 +666,8 @@ pub fn run_with_document(
                 sync, // the constructed PatternSync, watching a file or not per the match above
                 _watcher_handle: watcher_handle, // held only to keep the watcher thread alive, if there is one; see the field's own comment
                 events, // the channel Yoko2DApp::update polls each frame, if there is one
-                camera: camera::Camera::default(), // a sensible starting pan/zoom (see Camera::default's doc comment)
+                camera: camera::Camera::default(), // a placeholder starting pan/zoom, immediately replaced by an auto-fit on the first frame with a real canvas size (see camera_fitted's own comment)
+                camera_fitted: false, // triggers the one-time auto-fit-to-geometry in update()'s first frame
                 tool_controller: tool_controller::ToolController::default(), // no tool selected initially
                 active_dialog: None, // no formula dialog open initially
             };
@@ -658,5 +746,41 @@ mod tests {
 
         let point = sync.current_data().get_point(a1).unwrap();
         assert!((point.x - 8.0).abs() < 1e-9);
+    }
+
+    // This project has no pixel-level GUI testing infrastructure — nothing
+    // here can render a frame and inspect actual pixel colors — so a real
+    // "is this point visible against the background" test isn't possible.
+    // Instead, this asserts at the SOURCE level that the exact regression
+    // that caused this bug (Point/Line geometry hardcoded to a plain-white
+    // egui color constant, invisible against a light theme) can't be
+    // silently reintroduced: it reads this very file's own source text and
+    // checks that the offending constant's full name is absent. This is a
+    // narrow, pragmatic guard, not a general-purpose styling test — it
+    // exists specifically because plain white was what broke visibility
+    // here, not because white is inherently disallowed. A genuinely new,
+    // different reason to draw something in white in the future (a
+    // deliberate design choice, not a hardcoded-color-vs-theme mistake)
+    // would need to update this test alongside the code — that update
+    // friction is the intended point, forcing a conscious decision rather
+    // than an accidental regression.
+    //
+    // The needle below is deliberately built from two concatenated halves,
+    // and this explanatory comment deliberately never spells it out as one
+    // contiguous token: `include_str!` below reads this ENTIRE file,
+    // including this test's own source, so writing the offending name as
+    // one unbroken literal anywhere in this file — even here, in a comment
+    // about it — would make the file always contain it and this assertion
+    // would trivially (and uselessly) always fail.
+    #[test]
+    fn point_and_line_rendering_never_hardcodes_the_plain_white_color_constant_again() {
+        let source = include_str!("lib.rs"); // this file's own source text, read at test time (not the compiled binary)
+        let forbidden_color_constant = format!("Color32::{}", "WHITE"); // built from two pieces so this file never contains the full name as one contiguous literal (see the comment above)
+        assert!(
+            !source.contains(&forbidden_color_constant), // the exact constant that caused points/lines to vanish against a light theme
+            "found a hardcoded plain-white egui color constant in lib.rs — this is the exact \
+             contrast bug that made pattern geometry invisible on light-themed systems; use an \
+             explicit, theme-independent color instead (see the Point/Line draw calls in update())"
+        );
     }
 }

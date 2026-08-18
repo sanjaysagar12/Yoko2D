@@ -23,7 +23,9 @@ fn main() {
             eprintln!("Usage:");
             eprintln!("  yoko2d-cli formula-check");
             eprintln!("  yoko2d-cli run <action-script.json> [--output <path.json>] [--save-pattern <path.xml>] [--open]");
-            eprintln!("  yoko2d-cli view <pattern.xml> [--measurements <path.json>] [--raw]");
+            eprintln!(
+                "  yoko2d-cli view <pattern.xml> [--measurements <path.json>] [--raw] [--open]"
+            );
             std::process::exit(1); // a missing/unknown subcommand is a usage error: exit non-zero, never panic
         }
     }
@@ -250,7 +252,7 @@ fn describe_tool(kind: &core_lib::ToolKind) -> String {
 }
 
 /// Parses `view`'s own arguments: a positional pattern-file path, plus the
-/// optional `--measurements <path>` and `--raw` flags.
+/// optional `--measurements <path>`, `--raw`, and `--open` flags.
 ///
 /// Same hand-rolled-loop approach as `run_command`'s own argument parsing,
 /// for the same "standard library only" reason.
@@ -258,6 +260,7 @@ fn view_command(args: &[String]) {
     let mut pattern_path: Option<PathBuf> = None; // the positional pattern-file path, once found
     let mut measurements_path: Option<PathBuf> = None; // set if --measurements <path> was given
     let mut raw = false; // set if --raw was given
+    let mut open_gui = false; // set if --open was given
 
     let mut i = 0; // manual index, since --measurements consumes two consecutive arguments (the flag and its value)
     while i < args.len() {
@@ -273,6 +276,10 @@ fn view_command(args: &[String]) {
             }
             "--raw" => {
                 raw = true; // a boolean flag: no following value to consume
+                i += 1; // consumed just this one argument
+            }
+            "--open" => {
+                open_gui = true; // a boolean flag: no following value to consume
                 i += 1; // consumed just this one argument
             }
             other => {
@@ -302,7 +309,13 @@ fn view_command(args: &[String]) {
         // mode exists for piping/diffing/scripting against the literal XML
         // text, not for a human-readable summary.
         print!("{contents}"); // print the exact raw file contents verbatim, including whatever trailing newline (or lack of one) the file itself has
-        return; // done: nothing below this point runs in --raw mode
+        if !open_gui {
+            return; // no --open given either: nothing more to do
+        }
+        // --open was ALSO given: fall through to load the Document below and
+        // open it, still skipping the Tools:/Resolved geometry summary
+        // printing --raw intentionally bypasses — --raw and --open are not
+        // mutually exclusive.
     }
 
     let (document, embedded_measurements_path) = io::deserialize_document(&contents)
@@ -311,18 +324,22 @@ fn view_command(args: &[String]) {
             std::process::exit(1);
         });
 
-    println!("Tools:"); // header for the always-shown tool-definition listing
-    for record in document.history() {
-        // print every ToolRecord, in history order, regardless of whether resolved geometry ends up available below
-        let variant = action_script::tool_kind_variant_name(&record.kind); // e.g. "BasePoint", "EndLine", "Line"
-        let name_part = action_script::tool_name(&record.kind) // this tool's user-facing name, if it has one
-            .map(|name| format!(" name={name:?}")) // quoted, with a leading space, ready to splice into the line below
-            .unwrap_or_default(); // Line has no name: print nothing extra for it
-        let details = describe_tool(&record.kind); // this tool's own reference/formula/literal fields
-        println!(
-            "  id={} {variant}{name_part} {details}", // one line per tool: id, kind, optional name, then its own reference/formula fields
-            record.id.raw()                           // the raw integer id, for a plain-text listing
-        );
+    if !raw {
+        // The summary listing itself is part of the non-raw view; skipped
+        // entirely in --raw mode (even when --raw+--open are combined).
+        println!("Tools:"); // header for the always-shown tool-definition listing
+        for record in document.history() {
+            // print every ToolRecord, in history order, regardless of whether resolved geometry ends up available below
+            let variant = action_script::tool_kind_variant_name(&record.kind); // e.g. "BasePoint", "EndLine", "Line"
+            let name_part = action_script::tool_name(&record.kind) // this tool's user-facing name, if it has one
+                .map(|name| format!(" name={name:?}")) // quoted, with a leading space, ready to splice into the line below
+                .unwrap_or_default(); // Line has no name: print nothing extra for it
+            let details = describe_tool(&record.kind); // this tool's own reference/formula/literal fields
+            println!(
+                "  id={} {variant}{name_part} {details}", // one line per tool: id, kind, optional name, then its own reference/formula fields
+                record.id.raw() // the raw integer id, for a plain-text listing
+            );
+        }
     }
 
     // Script-level `--measurements` takes precedence; otherwise fall back
@@ -331,55 +348,72 @@ fn view_command(args: &[String]) {
     // neither is present, no measurements are applied at all, and any
     // formula referencing an undefined variable simply fails to recompute
     // below — handled gracefully, not treated as fatal for this command.
+    // Computed unconditionally (not just for the non-raw recompute section
+    // below) since --open also reuses this exact resolution, rather than
+    // re-resolving it a second time.
     let effective_measurements_path = measurements_path
         .clone()
         .or_else(|| embedded_measurements_path.clone().map(PathBuf::from));
 
-    let mut doc_for_recompute = document.clone(); // clone so this command's own measurement application never mutates the Document the tool listing above already printed from
-    if let Some(path) = &effective_measurements_path {
-        // Best-effort: a measurements file that fails to load is treated
-        // exactly like "no measurements were available" — the recompute
-        // attempt below still runs (and may still succeed, e.g. if every
-        // formula in this pattern is a literal number needing no
-        // variables), and any failure it hits is reported by the same
-        // graceful "could not resolve geometry" message either way, rather
-        // than adding a second, separate fatal-error path here.
-        if let Ok(measurements) = io::load_measurements_from_file(path) {
-            doc_for_recompute.apply_measurements(measurements); // seed the variables this pattern's formulas may reference
+    if !raw {
+        let mut doc_for_recompute = document.clone(); // clone so this command's own measurement application never mutates the Document the tool listing above already printed from
+        if let Some(path) = &effective_measurements_path {
+            // Best-effort: a measurements file that fails to load is treated
+            // exactly like "no measurements were available" — the recompute
+            // attempt below still runs (and may still succeed, e.g. if every
+            // formula in this pattern is a literal number needing no
+            // variables), and any failure it hits is reported by the same
+            // graceful "could not resolve geometry" message either way, rather
+            // than adding a second, separate fatal-error path here.
+            if let Ok(measurements) = io::load_measurements_from_file(path) {
+                doc_for_recompute.apply_measurements(measurements); // seed the variables this pattern's formulas may reference
+            }
+        }
+
+        match core_lib::recompute_all(&doc_for_recompute) {
+            Ok(data) => {
+                // Viewing a pattern's STRUCTURE (above) should work even
+                // without its measurement file on hand; only this
+                // resolved-coordinates section needs a successful recompute.
+                match output::build_output(&data) {
+                    Ok(resolved) => {
+                        println!(); // blank line separating the two sections
+                        println!("Resolved geometry:"); // header for the resolved-coordinates section
+                        for point in &resolved.points {
+                            // one line per resolved point, in ascending-id order (build_output's own ordering guarantee)
+                            println!("  point id={} x={} y={}", point.id, point.x, point.y);
+                        }
+                        for line in &resolved.lines {
+                            // one line per resolved line, showing both endpoint ids and their already-resolved coordinates
+                            println!(
+                                "  line id={} p1={} ({}, {}) -> p2={} ({}, {})",
+                                line.id, line.p1, line.x1, line.y1, line.p2, line.x2, line.y2
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        println!("yoko2d-cli: could not resolve geometry ({err}) — showing tool definitions only");
+                        // e.g. a dangling line reference (shouldn't normally happen after a successful recompute, but handled rather than assumed)
+                    }
+                }
+            }
+            Err(err) => {
+                println!(
+                    "yoko2d-cli: could not resolve geometry ({err}) — showing tool definitions only"
+                ); // e.g. a formula referencing a measurement that was never loaded
+            }
         }
     }
 
-    match core_lib::recompute_all(&doc_for_recompute) {
-        Ok(data) => {
-            // Viewing a pattern's STRUCTURE (above) should work even
-            // without its measurement file on hand; only this
-            // resolved-coordinates section needs a successful recompute.
-            match output::build_output(&data) {
-                Ok(resolved) => {
-                    println!(); // blank line separating the two sections
-                    println!("Resolved geometry:"); // header for the resolved-coordinates section
-                    for point in &resolved.points {
-                        // one line per resolved point, in ascending-id order (build_output's own ordering guarantee)
-                        println!("  point id={} x={} y={}", point.id, point.x, point.y);
-                    }
-                    for line in &resolved.lines {
-                        // one line per resolved line, showing both endpoint ids and their already-resolved coordinates
-                        println!(
-                            "  line id={} p1={} ({}, {}) -> p2={} ({}, {})",
-                            line.id, line.p1, line.x1, line.y1, line.p2, line.x2, line.y2
-                        );
-                    }
-                }
-                Err(err) => {
-                    println!("yoko2d-cli: could not resolve geometry ({err}) — showing tool definitions only");
-                    // e.g. a dangling line reference (shouldn't normally happen after a successful recompute, but handled rather than assumed)
-                }
-            }
-        }
-        Err(err) => {
-            println!(
-                "yoko2d-cli: could not resolve geometry ({err}) — showing tool definitions only"
-            ); // e.g. a formula referencing a measurement that was never loaded
+    if open_gui {
+        // Reuses the EXACT `document` value and `effective_measurements_path`
+        // already computed above for the summary/recompute step — no
+        // reloading or re-resolving. `app::run_with_document` applies (and,
+        // if given a path, watches) the measurements itself internally, the
+        // same way run_command's own --open handling works.
+        if let Err(err) = app::run_with_document(document, effective_measurements_path) {
+            eprintln!("yoko2d-cli: failed to open GUI: {err}"); // e.g. the windowing backend failed to initialize
+            std::process::exit(1);
         }
     }
 }

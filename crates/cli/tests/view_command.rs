@@ -67,3 +67,23 @@ fn view_with_no_positional_argument_fails_with_a_usage_error() {
         .failure()
         .stderr(predicate::str::contains("yoko2d-cli"));
 }
+
+// Opens a real native window (via app::run_with_document, now a read-only
+// viewer — see crates/app/src/lib.rs), so it needs an actual display to run
+// against; this project has no automated GUI pixel-testing infrastructure
+// (see crates/app/src/lib.rs's own regression-guard tests for the same
+// limitation), matching how every other GUI-launching verification in this
+// project has always been described as manual, not automated. Run
+// explicitly, with a display available, via `cargo test -p cli -- --ignored`.
+#[test]
+#[ignore]
+fn view_open_launches_the_gui_without_erroring() {
+    Command::cargo_bin("yoko2d-cli")
+        .unwrap()
+        .current_dir(workspace_root())
+        .arg("view")
+        .arg("fixtures/patterns/l_shape.xml")
+        .arg("--open")
+        .assert()
+        .success();
+}

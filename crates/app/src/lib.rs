@@ -1,6 +1,5 @@
 pub mod camera; // Camera, pattern-space -> screen-pixel conversion
 pub mod sync; // PatternSync, SyncError
-pub mod tool_controller; // ToolController, ToolMode, PendingDialog, ClickOutcome, hit_test_point — pure, no egui
 pub mod watch; // WatchEvent, WatchError, WatcherHandle, spawn_watcher
 
 /// The root egui application state.
@@ -25,189 +24,6 @@ struct Yoko2DApp {
     // `true` right after that one-time fit, so a user's later pan/zoom
     // (once implemented) isn't silently overwritten on every frame.
     camera_fitted: bool,
-    tool_controller: tool_controller::ToolController, // which construction tool is selected and its in-progress clicks (Phase 11)
-    active_dialog: Option<tool_controller::PendingDialog>, // a formula dialog currently open, if any (Phase 11)
-}
-
-/// Commits `kind` to `sync` via the matching `UndoStack::do_add_*` method,
-/// dispatching on which `ToolKind` variant it is.
-///
-/// Shared by both the immediate-completion click path (`Complete(kind)`)
-/// and the dialog-confirm path (`finish_dialog` succeeding), since both
-/// eventually need to turn a resolved `ToolKind` into an actual `Document`
-/// edit the same way.
-fn commit_tool_kind(sync: &mut sync::PatternSync, kind: core_lib::ToolKind) {
-    let result = sync.perform_edit(|doc, undo_stack| {
-        // clone-then-commit: perform_edit only applies this closure's edits to `sync` if recompute succeeds afterward
-        match kind {
-            // dispatch on which kind of tool this is, calling the matching UndoStack::do_add_* method
-            core_lib::ToolKind::BasePoint { name, x, y } => {
-                undo_stack.do_add_base_point(doc, name, x, y); // infallible: BasePoint has no references to validate
-                Ok(())
-            }
-            core_lib::ToolKind::Line { p1, p2 } => {
-                undo_stack.do_add_line(doc, p1, p2)?; // propagate a validation failure, if any, via ?
-                Ok(())
-            }
-            core_lib::ToolKind::Midpoint { name, p1, p2 } => {
-                undo_stack.do_add_midpoint(doc, name, p1, p2)?; // propagate a validation failure, if any
-                Ok(())
-            }
-            core_lib::ToolKind::EndLine {
-                name,
-                base_point,
-                angle_formula,
-                length_formula,
-            } => {
-                undo_stack.do_add_end_line(doc, name, base_point, angle_formula, length_formula)?; // propagate a validation failure, if any
-                Ok(())
-            }
-            core_lib::ToolKind::AlongLine {
-                name,
-                p1,
-                p2,
-                length_formula,
-            } => {
-                undo_stack.do_add_along_line(doc, name, p1, p2, length_formula)?; // propagate a validation failure, if any
-                Ok(())
-            }
-            core_lib::ToolKind::Normal {
-                name,
-                p1,
-                p2,
-                length_formula,
-                angle_formula,
-            } => {
-                undo_stack.do_add_normal(doc, name, p1, p2, length_formula, angle_formula)?; // propagate a validation failure, if any
-                Ok(())
-            }
-            core_lib::ToolKind::Bisector {
-                name,
-                p1,
-                p2,
-                p3,
-                length_formula,
-            } => {
-                undo_stack.do_add_bisector(doc, name, p1, p2, p3, length_formula)?; // propagate a validation failure, if any
-                Ok(())
-            }
-            core_lib::ToolKind::Height {
-                name,
-                point,
-                line_p1,
-                line_p2,
-            } => {
-                undo_stack.do_add_height(doc, name, point, line_p1, line_p2)?; // propagate a validation failure, if any
-                Ok(())
-            }
-            // Piece (Phase 12) has no toolbar entry point in this phase — no
-            // ToolKindSelector variant, and no click-to-draw state machine
-            // support — and `UndoStack` has no `do_add_piece` yet either;
-            // building pieces interactively is explicitly out of scope for
-            // Phase 12 (see its own scope note). Handled here anyway, as a
-            // no-op, purely so this match stays exhaustive against the
-            // shared `ToolKind` type rather than silently failing to build.
-            core_lib::ToolKind::Piece { .. } => Ok(()),
-        }
-    });
-    if let Err(err) = result {
-        // A failed edit at this point should not be possible if hit-testing/
-        // state-machine logic above is correct, but defensive error handling
-        // here prevents a UI crash if it somehow is.
-        eprintln!("yoko2d: failed to commit tool: {err}");
-    }
-}
-
-/// Draws one live-validated formula text field with a colored ok/error
-/// indicator, returning whether the current text evaluates successfully
-/// against `vars`.
-///
-/// Shared by every formula field in the dialog UI, so the "type text,
-/// evaluate every frame, show green/red" behavior — matching the original
-/// app's `EditFormulaDialog` — isn't duplicated per field.
-fn formula_field(
-    ui: &mut egui::Ui, // the dialog window's Ui to draw into
-    label: &str,       // this field's caption, e.g. "Length:"
-    text: &mut String, // the editable formula text itself
-    vars: &std::collections::HashMap<String, f64>, // the live variable table to validate against, this frame
-) -> bool {
-    let is_ok = core_lib::formula::eval_formula(text, vars).is_ok(); // live-evaluate the current text every frame
-    ui.horizontal(|ui| {
-        ui.label(label); // the field's caption
-        ui.text_edit_singleline(text); // the editable formula text
-        if is_ok {
-            ui.colored_label(egui::Color32::GREEN, "\u{2713}"); // green checkmark: currently evaluates successfully
-        } else {
-            ui.colored_label(egui::Color32::RED, "\u{2717}"); // red X: does not currently evaluate
-        }
-    });
-    is_ok // hand back whether this field currently validates, so the caller can gate the OK button on ALL fields validating
-}
-
-/// Draws the name field plus every formula field for whichever
-/// `PendingDialog` variant `dialog` currently is, returning whether the
-/// dialog is ready to commit (a non-empty name AND every formula field
-/// currently valid).
-fn render_dialog_fields(
-    ui: &mut egui::Ui,
-    dialog: &mut tool_controller::PendingDialog,
-    vars: &std::collections::HashMap<String, f64>,
-) -> bool {
-    match dialog {
-        // dispatch on which dialog variant this is, drawing exactly the fields it has
-        tool_controller::PendingDialog::EndLine {
-            name,
-            angle_formula,
-            length_formula,
-            ..
-        } => {
-            ui.horizontal(|ui| {
-                ui.label("Name:"); // caption for the name field
-                ui.text_edit_singleline(name); // editable name text
-            });
-            let angle_ok = formula_field(ui, "Angle:", angle_formula, vars); // draws the field, returns whether it currently validates
-            let length_ok = formula_field(ui, "Length:", length_formula, vars); // same, for the length field
-            !name.is_empty() && angle_ok && length_ok // ready to commit only if every check passes
-        }
-        tool_controller::PendingDialog::AlongLine {
-            name,
-            length_formula,
-            ..
-        } => {
-            ui.horizontal(|ui| {
-                ui.label("Name:"); // caption for the name field
-                ui.text_edit_singleline(name); // editable name text
-            });
-            let length_ok = formula_field(ui, "Length:", length_formula, vars); // draws the field, returns whether it currently validates
-            !name.is_empty() && length_ok // ready to commit only if every check passes
-        }
-        tool_controller::PendingDialog::Normal {
-            name,
-            length_formula,
-            angle_formula,
-            ..
-        } => {
-            ui.horizontal(|ui| {
-                ui.label("Name:"); // caption for the name field
-                ui.text_edit_singleline(name); // editable name text
-            });
-            let length_ok = formula_field(ui, "Length:", length_formula, vars); // draws the field, returns whether it currently validates
-            let angle_ok = formula_field(ui, "Angle:", angle_formula, vars); // same, for the angle field
-            !name.is_empty() && length_ok && angle_ok // ready to commit only if every check passes
-        }
-        tool_controller::PendingDialog::Bisector {
-            name,
-            length_formula,
-            ..
-        } => {
-            ui.horizontal(|ui| {
-                ui.label("Name:"); // caption for the name field
-                ui.text_edit_singleline(name); // editable name text
-            });
-            let length_ok = formula_field(ui, "Length:", length_formula, vars); // draws the field, returns whether it currently validates
-            !name.is_empty() && length_ok // ready to commit only if every check passes
-        }
-    }
 }
 
 impl eframe::App for Yoko2DApp {
@@ -230,79 +46,14 @@ impl eframe::App for Yoko2DApp {
             }
         }
 
-        // Read every keyboard shortcut once per frame, via egui's
-        // closure-based input API (the InputState is behind a lock).
-        let (escape_pressed, undo_pressed, redo_pressed) = ctx.input(|i| {
-            let escape = i.key_pressed(egui::Key::Escape); // cancels the current tool / closes any open dialog
-            let undo = i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(egui::Key::Z); // Ctrl+Z, without Shift (Shift+Ctrl+Z means redo instead)
-            let redo = (i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) // Ctrl+Y ...
-                || (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z)); // ...or Ctrl+Shift+Z
-            (escape, undo, redo) // hand all three booleans back out of the locked closure at once
-        });
-
-        if escape_pressed {
-            self.tool_controller.cancel(); // reset the current tool's in-progress clicks (does NOT deselect the tool)
-            self.active_dialog = None; // also close any open formula dialog, discarding it without committing
-        }
-        if undo_pressed {
-            if let Err(err) = self.sync.undo() {
-                // self.sync.undo() above already reverted the last recorded edit, if any existed
-                eprintln!("yoko2d: undo failed: {err}"); // don't crash the UI over a failed undo
-            }
-        }
-        if redo_pressed {
-            if let Err(err) = self.sync.redo() {
-                // self.sync.redo() above already re-applied the last undone edit, if any existed
-                eprintln!("yoko2d: redo failed: {err}"); // don't crash the UI over a failed redo
-            }
-        }
-
-        // Toolbar: one button per ToolKindSelector variant, selecting that tool on click.
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Base Point").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::BasePoint);
-                }
-                if ui.button("Line").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::Line);
-                }
-                if ui.button("Midpoint").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::Midpoint);
-                }
-                if ui.button("End Line").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::EndLine);
-                }
-                if ui.button("Along Line").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::AlongLine);
-                }
-                if ui.button("Normal").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::Normal);
-                }
-                if ui.button("Bisector").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::Bisector);
-                }
-                if ui.button("Height").clicked() {
-                    self.tool_controller
-                        .select_tool(tool_controller::ToolKindSelector::Height);
-                }
-            });
-        });
-
         // Translate the current resolved geometry into draw commands once per frame,
         // outside the closure below so a render failure can be handled before any painting starts.
         let draw_result = render::render(self.sync.current_data());
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_size = ui.available_size(); // captured once, BEFORE allocate_painter reserves it below — needed both for the painter itself and for the camera auto-fit that follows
-                                                      // Reserve the whole remaining area as both a click target and a paint surface.
-            let (response, painter) = ui.allocate_painter(available_size, egui::Sense::click());
+                                                      // Reserve the whole remaining area as a paint surface only: this view is read-only, so it no longer needs to detect clicks at all — Sense::hover() is the minimal sense needed for the painter to still exist and be paintable into, without listening for interaction this view no longer responds to.
+            let (_response, painter) = ui.allocate_painter(available_size, egui::Sense::hover());
 
             if !self.camera_fitted {
                 // One-time auto-fit: collect every currently-resolved point's
@@ -331,33 +82,6 @@ impl eframe::App for Yoko2DApp {
                     self.camera =
                         camera::fit_to_points(&points, available_size.x, available_size.y); // center and scale the camera to this pattern's actual bounding box
                     self.camera_fitted = true; // don't keep re-fitting every frame once this has succeeded, so later manual pan/zoom (once implemented) won't be silently overwritten
-                }
-            }
-
-            if response.clicked() {
-                if let Some(screen_pos) = response.interact_pointer_pos() {
-                    let pattern_pos = self.camera.to_pattern(screen_pos.x, screen_pos.y); // screen pixels -> pattern space
-                                                                                          // Convert a fixed 8px screen radius into pattern-space units via the
-                                                                                          // current zoom, so hit-testing stays accurate regardless of zoom level.
-                    let tolerance = 8.0 / self.camera.zoom;
-                    let hit = tool_controller::hit_test_point(
-                        self.sync.current_data(),
-                        pattern_pos,
-                        tolerance,
-                    ); // find the closest existing point, if any, within tolerance
-                    let outcome = self.tool_controller.handle_click(pattern_pos, hit); // advance the tool state machine
-                    match outcome {
-                        tool_controller::ClickOutcome::NeedMoreInput
-                        | tool_controller::ClickOutcome::Ignored => {
-                            // stay in the current tool and wait; nothing further to do this frame
-                        }
-                        tool_controller::ClickOutcome::Complete(kind) => {
-                            commit_tool_kind(&mut self.sync, kind); // commit this tool to the document immediately
-                        }
-                        tool_controller::ClickOutcome::OpenDialog(pending) => {
-                            self.active_dialog = Some(pending); // show the formula dialog next frame
-                        }
-                    }
                 }
             }
 
@@ -438,85 +162,7 @@ impl eframe::App for Yoko2DApp {
                     eprintln!("yoko2d: render failed: {err}");
                 }
             }
-
-            // Live "rubber band" preview: while a multi-click tool has its
-            // first point already collected, draw a faint line from that
-            // point's current screen position to the mouse cursor — purely
-            // visual, matching the original app's VisLine-style live
-            // preview, and never committed to the Document.
-            let in_progress_first = match self.tool_controller.current_mode() {
-                tool_controller::ToolMode::Line { first: Some(id) } => Some(*id),
-                tool_controller::ToolMode::Midpoint { first: Some(id) } => Some(*id),
-                tool_controller::ToolMode::AlongLine {
-                    first: Some(id), ..
-                } => Some(*id),
-                tool_controller::ToolMode::Normal {
-                    first: Some(id), ..
-                } => Some(*id),
-                tool_controller::ToolMode::Bisector {
-                    first: Some(id), ..
-                } => Some(*id),
-                tool_controller::ToolMode::Height {
-                    first: Some(id), ..
-                } => Some(*id),
-                _ => None, // no tool, or a tool with no first click collected yet: nothing to preview
-            };
-            if let Some(first_id) = in_progress_first {
-                if let Ok(point) = self.sync.current_data().get_point(first_id) {
-                    if let Some(cursor_pos) = ui.input(|i| i.pointer.hover_pos()) {
-                        let (start_x, start_y) = self.camera.to_screen(point.x, point.y); // the collected first point's screen position
-                        painter.line_segment(
-                            [egui::pos2(start_x, start_y), cursor_pos], // from the first point to wherever the mouse currently is
-                            egui::Stroke::new(1.0_f32, egui::Color32::from_gray(128)), // a faint gray preview stroke, distinct from committed geometry's white
-                        );
-                    }
-                }
-            }
         });
-
-        // Formula dialog, if one is open. `.take()`s the Option out of
-        // self first, so the rest of this block is fully decoupled from
-        // self.active_dialog's borrow and can freely touch self.sync/
-        // self.tool_controller without any borrow-checker conflict.
-        if let Some(mut dialog) = self.active_dialog.take() {
-            let vars = core_lib::formula::flatten_variables(self.sync.current_data()); // live variable table for validating formula fields this frame
-            let mut keep_open = true; // whether the dialog should remain open after this frame
-            let mut confirmed_kind: Option<core_lib::ToolKind> = None; // set below if OK is pressed and finish_dialog succeeds
-
-            egui::Window::new("Tool Formula")
-                .collapsible(false) // a small fixed dialog, not a general-purpose panel
-                .resizable(false)
-                .show(ctx, |ui| {
-                    let all_valid = render_dialog_fields(ui, &mut dialog, &vars); // draw the fields, get whether they're all currently valid
-
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(all_valid, egui::Button::new("OK")).clicked() {
-                            match self.tool_controller.finish_dialog(dialog.clone()) {
-                                Ok(kind) => {
-                                    confirmed_kind = Some(kind); // commit after this closure returns, not from inside it
-                                    keep_open = false;
-                                }
-                                Err(err) => {
-                                    // Shouldn't happen given `all_valid` already gates OK on a
-                                    // non-empty name, but handled rather than silently ignored.
-                                    eprintln!("yoko2d: {err}");
-                                }
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            keep_open = false; // discard without committing anything
-                        }
-                    });
-                });
-
-            if let Some(kind) = confirmed_kind {
-                commit_tool_kind(&mut self.sync, kind); // safe now: the window closure above (which borrowed self.tool_controller) has already returned
-            }
-            if keep_open {
-                self.active_dialog = Some(dialog); // put it back so the same dialog keeps showing next frame
-            }
-            // else: leave self.active_dialog as None (already set by .take() above), closing the dialog
-        }
 
         // Request another repaint shortly, even with no user input: egui
         // otherwise only repaints in response to input events, so the
@@ -668,8 +314,6 @@ pub fn run_with_document(
                 events, // the channel Yoko2DApp::update polls each frame, if there is one
                 camera: camera::Camera::default(), // a placeholder starting pan/zoom, immediately replaced by an auto-fit on the first frame with a real canvas size (see camera_fitted's own comment)
                 camera_fitted: false, // triggers the one-time auto-fit-to-geometry in update()'s first frame
-                tool_controller: tool_controller::ToolController::default(), // no tool selected initially
-                active_dialog: None, // no formula dialog open initially
             };
             Ok(Box::new(app) as Box<dyn eframe::App>) // hand the constructed app back to eframe's event loop
         }),
@@ -781,6 +425,46 @@ mod tests {
             "found a hardcoded plain-white egui color constant in lib.rs — this is the exact \
              contrast bug that made pattern geometry invisible on light-themed systems; use an \
              explicit, theme-independent color instead (see the Point/Line draw calls in update())"
+        );
+    }
+
+    // This project's design is now CLI-only construction/editing (via the
+    // CLI's own action-script executor and pattern-XML load/modify
+    // support) with this crate's GUI reduced to a READ-ONLY VIEWER — no
+    // toolbar, no click handling, no tool selection, no formula dialogs,
+    // no undo/redo. Same source-level-guard technique as the color-
+    // constant regression test above, for the same reason (no pixel-level
+    // GUI testing infrastructure exists here): this reads lib.rs's own
+    // source and asserts neither the removed tool-selection module's name
+    // nor its former toolbar-button-selection enum name has been
+    // reintroduced, catching an accidental regression back toward
+    // interactive editing in the GUI layer before it ships.
+    //
+    // Deliberately never spells out either forbidden name anywhere in this
+    // comment or the assertions below, including in the panic messages:
+    // `include_str!` reads this ENTIRE file, including this test's own
+    // source, so writing either name as one unbroken literal ANYWHERE in
+    // this file — even in a comment or a failure message — would make the
+    // file always contain it and these assertions would trivially (and
+    // uselessly) always fail. Each needle is instead built at runtime from
+    // two concatenated halves, same trick as the color-constant guard.
+    #[test]
+    fn interactive_editing_is_never_reintroduced_into_the_gui_layer() {
+        let source = include_str!("lib.rs"); // this file's own source text, read at test time (not the compiled binary)
+        let forbidden_module = format!("tool_{}", "controller"); // the removed pure tool-selection state-machine module's name, built from two pieces so this file never contains it as one contiguous literal
+        let forbidden_selector = format!("ToolKind{}", "Selector"); // the removed toolbar-button-selection enum's name, same rationale
+        assert!(
+            !source.contains(&forbidden_module),
+            "found a reference to a removed GUI editing module in lib.rs — this project's GUI \
+             is a read-only viewer; interactive click-to-draw editing must not be reintroduced \
+             here (construction/editing belongs exclusively in the CLI's action-script executor)"
+        );
+        assert!(
+            !source.contains(&forbidden_selector),
+            "found a reference to a removed GUI tool-selection type in lib.rs — this project's \
+             GUI is a read-only viewer; interactive click-to-draw editing must not be \
+             reintroduced here (construction/editing belongs exclusively in the CLI's \
+             action-script executor)"
         );
     }
 }
